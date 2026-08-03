@@ -1,0 +1,7 @@
+*.pyc
+
+apps/web/.next/
+apps/web/node_modules/
+apps/api/tests/
+apps/web/out/
+apps/api/app/static/

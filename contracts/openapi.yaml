@@ -1,0 +1,1747 @@
+openapi: 3.0.3
+info:
+  title: AI ReqEval API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8000
+paths:
+  /api/v1/workspace/tree:
+    get:
+      summary: Get workspace project tree
+      tags: [workspace]
+      responses:
+        "200":
+          description: Aggregated workspace tree
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceTreeResponse"
+  /api/v1/health:
+    get:
+      summary: Health check
+      tags: [health]
+      responses:
+        "200":
+          description: Service status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                  status:
+                    type: string
+                required: [service, status]
+  /api/v1/projects:
+    get:
+      summary: List projects
+      tags: [projects]
+      responses:
+        "200":
+          description: Project list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+    post:
+      summary: Create project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Created project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectResponse"
+  /api/v1/projects/{project_id}:
+    get:
+      summary: Get project detail
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Project detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/projects/{project_id}/stages:
+    get:
+      summary: Get project stage tree
+      tags: [stages]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Stage tree
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StageListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/stages/{stage_id}:
+    get:
+      summary: Get stage detail
+      tags: [stages]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+      responses:
+        "200":
+          description: Stage detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StageResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/stages/{stage_id}/results:
+    get:
+      summary: List stage result versions
+      tags: [stages]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+      responses:
+        "200":
+          description: Stage result versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StageResultListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/stages/{stage_id}/conversations:
+    get:
+      summary: List stage conversations
+      tags: [conversations]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+      responses:
+        "200":
+          description: Stage conversations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      summary: Create stage conversation
+      tags: [conversations]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConversationRequest"
+      responses:
+        "201":
+          description: Created conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversation_id}:
+    get:
+      summary: Get conversation detail
+      tags: [conversations]
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "200":
+          description: Conversation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      summary: Archive or restore a conversation
+      tags: [conversations]
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [archive, restore]
+              required: [action]
+      responses:
+        "200":
+          description: Conversation updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Soft-delete a conversation
+      tags: [conversations]
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "204":
+          description: Conversation soft-deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/stages/{stage_id}/lock:
+    post:
+      summary: Lock stage
+      tags: [stages]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+      responses:
+        "200":
+          description: Locked stage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LockStageResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/stages/{stage_id}/lock-check:
+    get:
+      summary: Get stage lock checks
+      tags: [stages]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+      responses:
+        "200":
+          description: Stage lock checks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StageLockCheckResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/runs:
+    post:
+      summary: Create run
+      tags: [runs]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRunRequest"
+      responses:
+        "201":
+          description: Created run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunResponse"
+  /api/v1/runs/{run_id}:
+    get:
+      summary: Get run detail
+      tags: [runs]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/runs/{run_id}/events:
+    get:
+      summary: Stream run events
+      tags: [runs]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/skills:
+    get:
+      summary: List fixed skills
+      tags: [skills]
+      parameters:
+        - name: stage_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Skill list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/skills/{skill_id}/invoke:
+    post:
+      summary: Invoke fixed skill
+      tags: [skills]
+      parameters:
+        - $ref: "#/components/parameters/SkillId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvokeSkillRequest"
+      responses:
+        "200":
+          description: Skill invocation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillInvokeResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/autoresearch:
+    get:
+      summary: List autoResearch records
+      tags: [autoresearch]
+      parameters:
+        - name: stage_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: autoResearch records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResearchRecordListResponse"
+  /api/v1/autoresearch/run:
+    post:
+      summary: Generate autoResearch suggestion
+      tags: [autoresearch]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAutoResearchRequest"
+      responses:
+        "201":
+          description: Generated autoResearch suggestion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResearchRecordResponse"
+  /api/v1/autoresearch/manual:
+    post:
+      summary: Create manual autoResearch suggestion
+      tags: [autoresearch]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateManualAutoResearchRequest"
+      responses:
+        "201":
+          description: Created manual autoResearch suggestion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResearchRecordResponse"
+  /api/v1/autoresearch/{record_id}/confirm:
+    post:
+      summary: Confirm autoResearch suggestion
+      tags: [autoresearch]
+      parameters:
+        - $ref: "#/components/parameters/RecordId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmAutoResearchRequest"
+      responses:
+        "200":
+          description: Confirmed autoResearch suggestion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResearchConfirmResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /api/v1/files/upload:
+    post:
+      summary: Upload file artifact
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileUploadRequest"
+      responses:
+        "201":
+          description: Uploaded file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileArtifactResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/files:
+    get:
+      summary: List files
+      tags: [files]
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileArtifactListResponse"
+  /api/v1/files/{file_id}/parse:
+    post:
+      summary: Parse uploaded file
+      tags: [files]
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "200":
+          description: Parsed file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileArtifactResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/files/{file_id}/vision-parse:
+    post:
+      summary: Parse file with vision-capable LLM
+      tags: [files]
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VisionParseRequest"
+      responses:
+        "200":
+          description: Vision parse result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisionParseResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/vision-results:
+    get:
+      summary: List saved vision parse summaries
+      tags: [files]
+      parameters:
+        - name: project_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Vision result list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisionResultSummaryListResponse"
+  /api/v1/evidence:
+    get:
+      summary: Query evidence index
+      tags: [evidence]
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Evidence list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceListResponse"
+  /api/v1/reports/generate:
+    post:
+      summary: Generate report draft or final export
+      tags: [reports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateReportRequest"
+      responses:
+        "201":
+          description: Generated report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/reports/{report_id}:
+    get:
+      summary: Get report metadata
+      tags: [reports]
+      parameters:
+        - $ref: "#/components/parameters/ReportId"
+      responses:
+        "200":
+          description: Report metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/reports/{report_id}/content:
+    get:
+      summary: Get report content
+      tags: [reports]
+      parameters:
+        - $ref: "#/components/parameters/ReportId"
+      responses:
+        "200":
+          description: Report content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportContentResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/execution-logs:
+    get:
+      summary: Query execution logs
+      tags: [logs]
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Execution logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionLogListResponse"
+  /api/v1/version-logs:
+    get:
+      summary: Query version logs
+      tags: [logs]
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Version logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionLogListResponse"
+  /api/v1/projects/{project_id}/settings:
+    get:
+      summary: Get project settings bundle (published + draft)
+      tags: [settings]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Settings bundle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettingsBundleResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/projects/{project_id}/settings/draft:
+    post:
+      summary: Save or update the settings draft
+      tags: [settings]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsDraftRequest"
+      responses:
+        "200":
+          description: Saved draft
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettingsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Invalid settings payload
+  /api/v1/projects/{project_id}/settings/publish:
+    post:
+      summary: Publish the settings draft
+      tags: [settings]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishSettingsRequest"
+      responses:
+        "201":
+          description: Published settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettingsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Missing change_reason
+  /api/v1/projects/{project_id}/settings/reset:
+    post:
+      summary: Reset the settings draft from system defaults
+      tags: [settings]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: New draft from defaults
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettingsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/projects/{project_id}/settings/versions:
+    get:
+      summary: List settings versions
+      tags: [settings]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Settings versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettingsListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/projects/{project_id}/settings/impact:
+    get:
+      summary: Inspect impact of unpublished draft changes
+      tags: [settings]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Draft impact summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsImpactResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/model-options:
+    get:
+      summary: List model options
+      tags: [settings]
+      responses:
+        "200":
+          description: Allowed model providers/models
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelOptionListResponse"
+  /api/v1/skill-options:
+    get:
+      summary: List skill options
+      tags: [settings]
+      responses:
+        "200":
+          description: Available skill definitions for settings UI
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillOptionListResponse"
+components:
+  parameters:
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
+    StageId:
+      name: stage_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema:
+        type: string
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SkillId:
+      name: skill_id
+      in: path
+      required: true
+      schema:
+        type: string
+    RecordId:
+      name: record_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ReportId:
+      name: report_id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Request conflicts with current resource state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            type: object
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+      required: [detail]
+    CreateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        goal:
+          type: string
+          minLength: 1
+      required: [name, goal]
+    ProjectResponse:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        goal: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, name, goal, status, created_at, updated_at]
+    ProjectListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectResponse"
+      required: [items]
+    StageResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        objective:
+          type: string
+          nullable: true
+      required: [id, project_id, name, status, created_at]
+    StageListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageResponse"
+      required: [items]
+    StageResultResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        stage_id: { type: string }
+        version_id: { type: string }
+        base_version_id:
+          type: string
+          nullable: true
+        run_id: { type: string }
+        status: { type: string }
+        input_file_ids:
+          type: array
+          items: { type: string }
+        evidence_item_ids:
+          type: array
+          items: { type: string }
+        model_config:
+          type: object
+          additionalProperties: true
+        skill_versions:
+          type: object
+          additionalProperties:
+            type: string
+        autoresearch_record_ids:
+          type: array
+          items: { type: string }
+        confirmation_ids:
+          type: array
+          items: { type: string }
+        result_payload:
+          type: object
+          additionalProperties: true
+        summary: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        locked_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - project_id
+        - stage_id
+        - version_id
+        - run_id
+        - status
+        - input_file_ids
+        - evidence_item_ids
+        - model_config
+        - skill_versions
+        - autoresearch_record_ids
+        - confirmation_ids
+        - result_payload
+        - summary
+        - created_at
+        - updated_at
+    StageResultListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageResultResponse"
+      required: [items]
+    LockStageResponse:
+      type: object
+      properties:
+        stage:
+          $ref: "#/components/schemas/StageResponse"
+        version_log_id:
+          type: string
+        checks:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      required: [stage, version_log_id, checks]
+    StageLockCheckResponse:
+      type: object
+      properties:
+        stage_id:
+          type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageLockCheckItem"
+        ready:
+          type: boolean
+      required: [stage_id, checks, ready]
+    StageLockCheckItem:
+      type: object
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        passed:
+          type: boolean
+        advisory:
+          type: boolean
+          description: If true, this check informs but does not block the ready determination.
+      required: [key, label, passed]
+    CreateConversationRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+        initial_message:
+          type: string
+          nullable: true
+      required: [title]
+    ConversationResponse:
+      type: object
+      properties:
+        id: { type: string }
+        stage_id: { type: string }
+        project_id: { type: string }
+        title: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: string, format: date-time, nullable: true }
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationMessageResponse"
+      required: [id, stage_id, project_id, title, status, created_at, updated_at, messages]
+    ConversationMessageResponse:
+      type: object
+      properties:
+        role: { type: string }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+        source_event_id: { type: string, nullable: true }
+        run_id: { type: string, nullable: true }
+      required: [role, content, created_at]
+    ConversationListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationResponse"
+      required: [items]
+    WorkspaceStageNodeResponse:
+      allOf:
+        - $ref: "#/components/schemas/StageResponse"
+        - type: object
+          properties:
+            pending_confirmations:
+              type: integer
+            conversations:
+              type: array
+              items:
+                $ref: "#/components/schemas/ConversationResponse"
+          required: [pending_confirmations, conversations]
+    WorkspaceProjectNodeResponse:
+      allOf:
+        - $ref: "#/components/schemas/ProjectResponse"
+        - type: object
+          properties:
+            pending_count:
+              type: integer
+            stages:
+              type: array
+              items:
+                $ref: "#/components/schemas/WorkspaceStageNodeResponse"
+          required: [pending_count, stages]
+    WorkspaceTreeResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceProjectNodeResponse"
+      required: [items]
+    FileUploadRequest:
+      type: object
+      properties:
+        project_id: { type: string }
+        filename:
+          type: string
+          minLength: 1
+        content_type:
+          type: string
+        content:
+          type: string
+          nullable: true
+        content_base64:
+          type: string
+          nullable: true
+      required: [project_id, filename]
+    FileArtifactResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        filename: { type: string }
+        content_type: { type: string }
+        status: { type: string }
+        storage_path:
+          type: string
+          nullable: true
+        size_bytes: { type: integer }
+        created_at: { type: string, format: date-time }
+      required: [id, project_id, filename, content_type, status, size_bytes, created_at]
+    FileArtifactListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileArtifactResponse"
+      required: [items]
+    VisionParseRequest:
+      type: object
+      properties:
+        prompt:
+          type: string
+          minLength: 1
+        target_schema:
+          type: object
+          additionalProperties:
+            type: string
+        project_context:
+          type: object
+          additionalProperties: true
+      required: [prompt, target_schema]
+    VisionParseResponse:
+      type: object
+      properties:
+        file_id: { type: string }
+        project_id: { type: string }
+        model: { type: string }
+        structured_fields:
+          type: object
+          additionalProperties: true
+        evidence_fragments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        uncertainties:
+          type: array
+          items: { type: string }
+        to_confirm:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        raw_response: { type: string }
+      required: [file_id, project_id, model, structured_fields, evidence_fragments, uncertainties, to_confirm, raw_response]
+    VisionResultSummaryResponse:
+      type: object
+      properties:
+        file_id: { type: string }
+        model: { type: string }
+        structured_fields:
+          type: object
+          additionalProperties: true
+        evidence_fragments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        uncertainties:
+          type: array
+          items: { type: string }
+        to_confirm:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      required: [file_id, model, structured_fields, evidence_fragments, uncertainties, to_confirm]
+    VisionResultSummaryListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/VisionResultSummaryResponse"
+      required: [items]
+    EvidenceItemResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        source_type: { type: string }
+        source_file_id:
+          type: string
+          nullable: true
+        attachment_path:
+          type: string
+          nullable: true
+        snippet:
+          type: string
+          nullable: true
+        created_at: { type: string, format: date-time }
+        status: { type: string }
+        review_note:
+          type: string
+          nullable: true
+        updated_at: { type: string, format: date-time }
+      required: [id, project_id, name, source_type, created_at, status, updated_at]
+    EvidenceListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceItemResponse"
+      required: [items]
+    CreateRunRequest:
+      type: object
+      properties:
+        project_id: { type: string }
+        goal:
+          type: string
+          minLength: 1
+        stage_id:
+          type: string
+          nullable: true
+        conversation_id:
+          type: string
+          nullable: true
+      required: [project_id, goal]
+    RunResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        stage_id:
+          type: string
+          nullable: true
+        conversation_id:
+          type: string
+          nullable: true
+        goal: { type: string }
+        status: { type: string }
+        failure_reason:
+          type: string
+          nullable: true
+        failure_context:
+          type: object
+          additionalProperties: true
+        config_version_id:
+          type: string
+          nullable: true
+        created_at: { type: string, format: date-time }
+      required: [id, project_id, goal, status, failure_context, created_at]
+    SkillResponse:
+      type: object
+      properties:
+        name: { type: string }
+        stage_suffix: { type: string }
+        description: { type: string }
+        input_schema:
+          type: object
+          additionalProperties:
+            type: string
+        output_schema:
+          type: object
+          additionalProperties:
+            type: string
+        allowed_tools:
+          type: array
+          items: { type: string }
+        allowed_subagents:
+          type: array
+          items: { type: string }
+        auto_run_condition: { type: string }
+        visibility: { type: string }
+      required: [name, stage_suffix, description, input_schema, output_schema, allowed_tools, allowed_subagents, auto_run_condition, visibility]
+    SkillListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillResponse"
+      required: [items]
+    InvokeSkillRequest:
+      type: object
+      properties:
+        project_id: { type: string }
+        stage_id: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        goal:
+          type: string
+          minLength: 1
+      required: [project_id, stage_id, goal]
+    SkillInvokeResponse:
+      type: object
+      properties:
+        skill_name: { type: string }
+        stage_id: { type: string }
+        project_id: { type: string }
+        summary: { type: string }
+        tool_names:
+          type: array
+          items: { type: string }
+        subagent_names:
+          type: array
+          items: { type: string }
+        enabled_tools:
+          type: array
+          items: { type: string }
+        enabled_subagents:
+          type: array
+          items: { type: string }
+        config_version_id:
+          type: string
+          nullable: true
+        goal: { type: string }
+        stage_result_id: { type: string }
+        report_id:
+          type: string
+          nullable: true
+        tool_results:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      required: [skill_name, stage_id, project_id, summary, tool_names, subagent_names, goal, stage_result_id, tool_results]
+    CreateAutoResearchRequest:
+      type: object
+      properties:
+        stage_id: { type: string }
+        run_id: { type: string }
+      required: [stage_id, run_id]
+    CreateManualAutoResearchRequest:
+      type: object
+      properties:
+        stage_id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        action: { type: string }
+        impact: { type: string }
+        risk: { type: string }
+        source: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        context:
+          type: object
+          additionalProperties: true
+      required: [stage_id, title, description, action]
+    ConfirmAutoResearchRequest:
+      type: object
+      properties:
+        decision: { type: string }
+        note:
+          type: string
+          nullable: true
+        edited_description:
+          type: string
+          nullable: true
+      required: [decision]
+    AutoResearchRecordResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        stage_id: { type: string }
+        run_id: { type: string }
+        stage_result_id: { type: string }
+        title: { type: string }
+        source: { type: string }
+        impact: { type: string }
+        risk: { type: string }
+        description: { type: string }
+        action: { type: string }
+        context:
+          type: object
+          additionalProperties: true
+        status: { type: string }
+        note:
+          type: string
+          nullable: true
+        edited_description:
+          type: string
+          nullable: true
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - project_id
+        - stage_id
+        - run_id
+        - stage_result_id
+        - title
+        - source
+        - impact
+        - risk
+        - description
+        - action
+        - context
+        - status
+        - created_at
+        - updated_at
+    AutoResearchRecordListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutoResearchRecordResponse"
+      required: [items]
+    AutoResearchConfirmResponse:
+      type: object
+      properties:
+        record:
+          $ref: "#/components/schemas/AutoResearchRecordResponse"
+        stage_result:
+          allOf:
+            - $ref: "#/components/schemas/StageResultResponse"
+          nullable: true
+      required: [record]
+    GenerateReportRequest:
+      type: object
+      properties:
+        project_id: { type: string }
+        title:
+          type: string
+          minLength: 1
+      required: [project_id, title]
+    ReportResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        title: { type: string }
+        status: { type: string }
+        approval_check_passed: { type: boolean }
+        export_path:
+          type: string
+          nullable: true
+        decision_card_path:
+          type: string
+          nullable: true
+        evidence_directory_path:
+          type: string
+          nullable: true
+        bundle_export_path:
+          type: string
+          nullable: true
+        stage_result_ids:
+          type: array
+          items: { type: string }
+        evidence_item_ids:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+      required:
+        - id
+        - project_id
+        - title
+        - status
+        - approval_check_passed
+        - stage_result_ids
+        - evidence_item_ids
+        - created_at
+    ReportContentResponse:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        status: { type: string }
+        content: { type: string }
+      required: [id, title, status, content]
+    ExecutionLogResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+      required: [id, project_id, action, resource_type, resource_id, details, created_at]
+    ExecutionLogListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExecutionLogResponse"
+      required: [items]
+    VersionLogResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        change_type: { type: string }
+        summary: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+      required: [id, project_id, resource_type, resource_id, change_type, summary, details, created_at]
+    VersionLogListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/VersionLogResponse"
+      required: [items]
+    ModelProfileResponse:
+      type: object
+      properties:
+        role: { type: string }
+        provider: { type: string }
+        model_name: { type: string }
+        enabled: { type: boolean }
+        temperature: { type: number }
+        max_tokens: { type: integer }
+        timeout_seconds: { type: integer }
+        retry_limit: { type: integer }
+        capability_tags:
+          type: array
+          items: { type: string }
+        cost_note: { type: string }
+        risk_note: { type: string }
+      required:
+        - role
+        - provider
+        - model_name
+        - enabled
+        - temperature
+        - max_tokens
+        - timeout_seconds
+        - retry_limit
+    PromptTemplateResponse:
+      type: object
+      properties:
+        id: { type: string }
+        category: { type: string }
+        scope: { type: string }
+        title: { type: string }
+        body: { type: string }
+        required_variables:
+          type: array
+          items: { type: string }
+        skill_name:
+          type: string
+          nullable: true
+        version: { type: string }
+      required:
+        - id
+        - category
+        - body
+        - required_variables
+        - version
+    StageSkillProfileResponse:
+      type: object
+      properties:
+        stage_id: { type: string }
+        primary_skill: { type: string }
+        enabled_tools:
+          type: array
+          items: { type: string }
+        enabled_subagents:
+          type: array
+          items: { type: string }
+        auto_run_condition: { type: string }
+        skill_versions:
+          type: object
+          additionalProperties: { type: string }
+      required:
+        - stage_id
+        - primary_skill
+        - enabled_tools
+        - enabled_subagents
+        - auto_run_condition
+    RunPolicyResponse:
+      type: object
+      properties:
+        require_change_reason: { type: boolean }
+        require_prompt_review: { type: boolean }
+        record_model_outputs: { type: boolean }
+        record_prompt_snapshot: { type: boolean }
+        allow_locked_stage_rerun: { type: boolean }
+        min_audit_requirements:
+          type: array
+          items: { type: string }
+      required:
+        - require_change_reason
+        - require_prompt_review
+        - record_model_outputs
+        - record_prompt_snapshot
+        - allow_locked_stage_rerun
+        - min_audit_requirements
+    ProjectSettingsResponse:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        version_id: { type: string }
+        base_version_id:
+          type: string
+          nullable: true
+        status: { type: string }
+        config_hash: { type: string }
+        change_reason: { type: string }
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelProfileResponse"
+        prompts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PromptTemplateResponse"
+        stage_skill_profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageSkillProfileResponse"
+        run_policy:
+          $ref: "#/components/schemas/RunPolicyResponse"
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_by: { type: string }
+      required:
+        - id
+        - project_id
+        - version_id
+        - status
+        - config_hash
+        - change_reason
+        - models
+        - prompts
+        - stage_skill_profiles
+        - run_policy
+        - created_at
+        - updated_at
+        - created_by
+    ProjectSettingsBundleResponse:
+      type: object
+      properties:
+        published:
+          $ref: "#/components/schemas/ProjectSettingsResponse"
+          nullable: true
+        draft:
+          $ref: "#/components/schemas/ProjectSettingsResponse"
+          nullable: true
+        has_draft: { type: boolean }
+      required: [published, draft, has_draft]
+    ProjectSettingsListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectSettingsResponse"
+      required: [items]
+    SettingsDraftRequest:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelProfileResponse"
+        prompts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PromptTemplateResponse"
+        stage_skill_profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageSkillProfileResponse"
+        run_policy:
+          $ref: "#/components/schemas/RunPolicyResponse"
+        change_reason: { type: string }
+      required:
+        - models
+        - prompts
+        - stage_skill_profiles
+        - run_policy
+    PublishSettingsRequest:
+      type: object
+      properties:
+        draft_id:
+          type: string
+          nullable: true
+        change_reason: { type: string }
+      required: [change_reason]
+    ModelOptionResponse:
+      type: object
+      properties:
+        provider: { type: string }
+        model_name: { type: string }
+        capability_tags:
+          type: array
+          items: { type: string }
+        cost_note: { type: string }
+        risk_note: { type: string }
+      required: [provider, model_name, capability_tags, cost_note, risk_note]
+    ModelOptionListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelOptionResponse"
+      required: [items]
+    SkillOptionResponse:
+      type: object
+      properties:
+        name: { type: string }
+        stage_suffix: { type: string }
+        description: { type: string }
+        allowed_tools:
+          type: array
+          items: { type: string }
+        allowed_subagents:
+          type: array
+          items: { type: string }
+        auto_run_condition: { type: string }
+        visibility: { type: string }
+      required: [name, stage_suffix, description, allowed_tools, allowed_subagents, auto_run_condition, visibility]
+    SkillOptionListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillOptionResponse"
+      required: [items]
+    SettingsImpactResponse:
+      type: object
+      properties:
+        project_id: { type: string }
+        draft_id:
+          type: string
+          nullable: true
+        draft_version_id:
+          type: string
+          nullable: true
+        has_draft: { type: boolean }
+        impacted_stages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        impacted_models:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        impacted_prompts:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        impacted_policy_keys:
+          type: array
+          items: { type: string }
+        summary: { type: string }
+      required:
+        - project_id
+        - has_draft
+        - impacted_stages
+        - impacted_models
+        - impacted_prompts
+        - impacted_policy_keys
+        - summary

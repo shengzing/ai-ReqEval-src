@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-reqeval.local/contracts/jsonschema/report.schema.json",
+  "title": "ReportArtifact",
+  "type": "object",
+  "required": [
+    "id",
+    "project_id",
+    "title",
+    "status",
+    "approval_check_passed",
+    "stage_result_ids",
+    "evidence_item_ids",
+    "created_at"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "title": { "type": "string" },
+    "status": { "type": "string" },
+    "approval_check_passed": { "type": "boolean" },
+    "export_path": { "type": ["string", "null"] },
+    "decision_card_path": { "type": ["string", "null"] },
+    "evidence_directory_path": { "type": ["string", "null"] },
+    "bundle_export_path": { "type": ["string", "null"] },
+    "stage_result_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "evidence_item_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

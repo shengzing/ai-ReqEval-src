@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-reqeval.local/contracts/jsonschema/stage-result.schema.json",
+  "title": "StageResult",
+  "type": "object",
+  "required": [
+    "id",
+    "project_id",
+    "stage_id",
+    "version_id",
+    "run_id",
+    "status",
+    "input_file_ids",
+    "evidence_item_ids",
+    "model_config",
+    "skill_versions",
+    "autoresearch_record_ids",
+    "confirmation_ids",
+    "result_payload",
+    "summary",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "stage_id": { "type": "string" },
+    "version_id": { "type": "string" },
+    "base_version_id": { "type": ["string", "null"] },
+    "run_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["draft", "locked"] },
+    "input_file_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "evidence_item_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "model_config": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "skill_versions": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "autoresearch_record_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "confirmation_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "result_payload": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "summary": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "locked_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

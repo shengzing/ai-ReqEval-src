@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-reqeval.local/contracts/jsonschema/autoresearch-record.schema.json",
+  "title": "AutoResearchRecord",
+  "type": "object",
+  "required": [
+    "id",
+    "project_id",
+    "stage_id",
+    "run_id",
+    "stage_result_id",
+    "title",
+    "source",
+    "impact",
+    "risk",
+    "description",
+    "action",
+    "context",
+    "status",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "stage_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "stage_result_id": { "type": "string" },
+    "title": { "type": "string" },
+    "source": { "type": "string" },
+    "impact": { "type": "string" },
+    "risk": { "type": "string" },
+    "description": { "type": "string" },
+    "action": { "type": "string" },
+    "context": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "accepted", "accepted_with_edits", "rejected", "follow_up"]
+    },
+    "note": { "type": ["string", "null"] },
+    "edited_description": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "confirmed_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

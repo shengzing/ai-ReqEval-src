@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-reqeval.local/contracts/jsonschema/run-event-frame.schema.json",
+  "title": "RunEventFrame",
+  "type": "object",
+  "required": ["type", "payload", "created_at"],
+  "properties": {
+    "type": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

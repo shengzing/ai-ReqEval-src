@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-reqeval.local/contracts/jsonschema/project-settings.schema.json",
+  "title": "ProjectSettings",
+  "description": "Project-level settings (model profiles, prompt templates, stage skill profiles, run policy). Aligned with ProjectSettingsResponse and the project_settings collection.",
+  "type": "object",
+  "required": [
+    "id",
+    "project_id",
+    "version_id",
+    "status",
+    "config_hash",
+    "models",
+    "prompts",
+    "stage_skill_profiles",
+    "run_policy"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "version_id": { "type": "string" },
+    "base_version_id": { "type": ["string", "null"] },
+    "status": { "type": "string", "enum": ["draft", "published"] },
+    "config_hash": { "type": "string" },
+    "change_reason": { "type": "string" },
+    "models": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ModelProfile" }
+    },
+    "prompts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/PromptTemplate" }
+    },
+    "stage_skill_profiles": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/StageSkillProfile" }
+    },
+    "run_policy": { "$ref": "#/$defs/RunPolicy" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "published_at": { "type": ["string", "null"], "format": "date-time" },
+    "created_by": { "type": "string" }
+  },
+  "$defs": {
+    "ModelProfile": {
+      "type": "object",
+      "required": [
+        "role",
+        "provider",
+        "model_name",
+        "enabled",
+        "temperature",
+        "max_tokens",
+        "timeout_seconds",
+        "retry_limit"
+      ],
+      "properties": {
+        "role": { "type": "string", "enum": ["general", "vision", "judge"] },
+        "provider": { "type": "string" },
+        "model_name": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "retry_limit": { "type": "integer", "minimum": 0 },
+        "capability_tags": { "type": "array", "items": { "type": "string" } },
+        "cost_note": { "type": "string" },
+        "risk_note": { "type": "string" }
+      }
+    },
+    "PromptTemplate": {
+      "type": "object",
+      "required": ["id", "category", "body", "required_variables"],
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string", "enum": ["system", "stage", "vision", "judge", "report"] },
+        "scope": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "required_variables": { "type": "array", "items": { "type": "string" } },
+        "skill_name": { "type": ["string", "null"] },
+        "version": { "type": "string" }
+      }
+    },
+    "StageSkillProfile": {
+      "type": "object",
+      "required": [
+        "stage_id",
+        "primary_skill",
+        "enabled_tools",
+        "enabled_subagents",
+        "auto_run_condition"
+      ],
+      "properties": {
+        "stage_id": { "type": "string" },
+        "primary_skill": { "type": "string" },
+        "enabled_tools": { "type": "array", "items": { "type": "string" } },
+        "enabled_subagents": { "type": "array", "items": { "type": "string" } },
+        "auto_run_condition": { "type": "string", "enum": ["manual", "on_inputs_ready", "auto"] },
+        "skill_versions": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "RunPolicy": {
+      "type": "object",
+      "required": [
+        "require_change_reason",
+        "require_prompt_review",
+        "record_model_outputs",
+        "record_prompt_snapshot",
+        "allow_locked_stage_rerun",
+        "min_audit_requirements"
+      ],
+      "properties": {
+        "require_change_reason": { "type": "boolean" },
+        "require_prompt_review": { "type": "boolean" },
+        "record_model_outputs": { "type": "boolean" },
+        "record_prompt_snapshot": { "type": "boolean" },
+        "allow_locked_stage_rerun": { "type": "boolean" },
+        "min_audit_requirements": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
