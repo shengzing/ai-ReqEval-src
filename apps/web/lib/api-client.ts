@@ -6,6 +6,7 @@ import type {
   Stage,
   StageSkill,
   SuggestionCard,
+  SuggestionConfirmationResult,
 } from '@/lib/types'
 import type {
   ApiAutoResearchRecord,
@@ -40,6 +41,7 @@ import type {
 import { ApiError, parseErrorDetail } from '@/lib/api-error'
 import {
   mapAutoResearchRecordToSuggestion,
+  mapConversationToolCalls,
   mapRunEventsToConversation,
   mapRunEventsToSuggestions,
   mapRunEventsToToolCalls,
@@ -126,6 +128,8 @@ function mapConversation(item: ApiConversation): Conversation {
       content: message.content,
       created_at: message.created_at,
       harnessWarnings: message.harness_warnings,
+      toolCalls: mapConversationToolCalls(message.tool_calls),
+      processOnly: message.process_only,
       actionProposals: message.action_proposals?.map((proposal) => ({
         id: proposal.id,
         actionType: proposal.action_type,
@@ -584,8 +588,8 @@ export async function confirmAutoResearchRecord(input: {
   decision: 'accepted' | 'accepted_with_edits' | 'rejected' | 'follow_up'
   note?: string
   editedDescription?: string
-}): Promise<SuggestionCard> {
-  const response = await fetchJson<{ record: ApiAutoResearchRecord }>(`/autoresearch/${input.recordId}/confirm`, {
+}): Promise<SuggestionConfirmationResult> {
+  const response = await fetchJson<{ record: ApiAutoResearchRecord; stage_result?: ApiStageResult | null }>(`/autoresearch/${input.recordId}/confirm`, {
     method: 'POST',
     body: JSON.stringify({
       decision: input.decision,
@@ -593,10 +597,13 @@ export async function confirmAutoResearchRecord(input: {
       edited_description: input.editedDescription,
     }),
   })
-  return mapAutoResearchRecordToSuggestion(response.record)
+  return {
+    suggestion: mapAutoResearchRecordToSuggestion(response.record),
+    stageResultPayload: response.stage_result?.result_payload,
+  }
 }
 
-export { mapAutoResearchRecordToSuggestion, mapRunEventsToConversation, mapRunEventsToSuggestions, mapRunEventsToToolCalls, mapRunStatus, mapStageStatus }
+export { mapAutoResearchRecordToSuggestion, mapConversationToolCalls, mapRunEventsToConversation, mapRunEventsToSuggestions, mapRunEventsToToolCalls, mapRunStatus, mapStageStatus }
 export type { RunEventFrame }
 
 export async function loadProjectSettingsBundle(projectId: string): Promise<ApiProjectSettingsBundle> {

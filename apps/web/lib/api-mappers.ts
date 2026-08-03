@@ -107,7 +107,7 @@ function getRunEventName(item: RunEventFrame) {
 }
 
 function getRunEventStatus(item: RunEventFrame): ToolCall['status'] {
-  if (item.event.endsWith('_failed') || item.event === 'run.harness_fallback') return 'failed'
+  if (item.data.payload.status === 'failed' || item.event.endsWith('_failed') || item.event === 'run.harness_fallback') return 'failed'
   if (item.event.endsWith('_completed') || item.event === 'run.harness_planned' || item.event === 'run.harness_decision') return 'completed'
   return 'running'
 }
@@ -125,6 +125,30 @@ function getRunEventOutput(item: RunEventFrame) {
   return undefined
 }
 
+function getRunEventDetails(item: RunEventFrame): Record<string, unknown> | undefined {
+  const payload = item.data.payload
+  const rawOutput = payload.raw_output
+  if (rawOutput && typeof rawOutput === 'object' && !Array.isArray(rawOutput)) {
+    return rawOutput as Record<string, unknown>
+  }
+  const details = payload.details
+  if (details && typeof details === 'object' && !Array.isArray(details)) {
+    return details as Record<string, unknown>
+  }
+  return undefined
+}
+
+function getRunEventEvidenceRefs(item: RunEventFrame): string[] | undefined {
+  const refs = item.data.payload.evidence_refs
+  if (!Array.isArray(refs)) return undefined
+  const normalized = refs.filter((item): item is string => typeof item === 'string' && item.length > 0)
+  return normalized.length > 0 ? normalized : undefined
+}
+
+function hasExecutionOutput(details: Record<string, unknown> | undefined) {
+  return Boolean(details && Object.keys(details).length > 0)
+}
+
 export function mapRunEventsToToolCalls(events: RunEventFrame[]): ToolCall[] {
   return events
     .filter((item) => RUN_PROGRESS_EVENTS.has(item.event))
@@ -133,7 +157,48 @@ export function mapRunEventsToToolCalls(events: RunEventFrame[]): ToolCall[] {
       name: getRunEventName(item),
       status: getRunEventStatus(item),
       output: getRunEventOutput(item),
+      details: getRunEventDetails(item),
+      evidenceRefs: getRunEventEvidenceRefs(item),
+      source: 'stage_run',
+      canConfirm: item.event === 'run.tool_completed' && hasExecutionOutput(getRunEventDetails(item)),
     }))
+}
+
+export function mapConversationToolCalls(toolCalls: unknown): ToolCall[] {
+  if (!Array.isArray(toolCalls)) return []
+  return toolCalls.flatMap((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const call = item as Record<string, unknown>
+    const payload = call.payload && typeof call.payload === 'object' && !Array.isArray(call.payload)
+      ? call.payload as Record<string, unknown>
+      : {}
+    const outputRecord = payload.output && typeof payload.output === 'object' && !Array.isArray(payload.output)
+      ? payload.output as Record<string, unknown>
+      : undefined
+    const output = hasExecutionOutput(outputRecord) ? outputRecord : undefined
+    const evidenceRefs = Array.isArray(payload.evidence_refs)
+      ? payload.evidence_refs.filter((reference): reference is string => typeof reference === 'string' && reference.length > 0)
+      : undefined
+    const success = payload.success
+    const summary = typeof payload.summary === 'string'
+      ? payload.summary
+      : typeof call.reason === 'string' ? call.reason : undefined
+    const toolName = typeof call.tool_name === 'string' ? call.tool_name : `context_tool_${index + 1}`
+    const source = call.source === 'stage_run' ? 'stage_run' : 'conversation'
+    const status = call.status === 'running'
+      ? 'running'
+      : call.status === 'failed' || success === false ? 'failed' : 'completed'
+    return [{
+      id: `conversation-tool-${index}-${toolName}`,
+      name: toolName,
+      status,
+      output: summary,
+      details: output,
+      evidenceRefs,
+      source,
+      canConfirm: source === 'stage_run' && status === 'completed' && hasExecutionOutput(output),
+    }]
+  })
 }
 
 export function mapRunEventsToSuggestions(events: RunEventFrame[], stageId: string): SuggestionCard[] {

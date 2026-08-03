@@ -11,7 +11,7 @@ import { ApiError } from '@/lib/api-error'
 import { encodeProjectFile } from '@/lib/file-encoding'
 import { cn } from '@/lib/utils'
 import { loadFilePreview } from '@/lib/api-client'
-import type { Conversation, EvidenceItem, FilePreview, Project, RunStatus, Stage, StageSkill, SuggestionCard, ToolCall } from '@/lib/types'
+import type { Conversation, EvidenceItem, FilePreview, Project, RunStatus, Stage, StageSkill, SuggestionCard, SuggestionConfirmationResult, ToolCall } from '@/lib/types'
 import { buildEnrichedStage, resolveActiveConversation } from '@/lib/workspace-state'
 
 interface WorkspaceContentProps {
@@ -64,7 +64,7 @@ interface WorkspaceContentProps {
     risk?: 'low' | 'medium' | 'high'
     source?: string
     context?: Record<string, unknown>
-  }) => Promise<unknown>
+  }) => Promise<SuggestionCard>
   onParseEvidenceFile: (input: { fileId: string; projectId: string; stageId: string }) => Promise<void>
   onVisionParseEvidenceFile: (input: { fileId: string; projectId: string; stageId: string; stageName?: string }) => Promise<void>
   onGenerateReport: (input: { projectId: string; stageId: string; title: string }) => Promise<NonNullable<Stage['reportInfo']>>
@@ -83,6 +83,14 @@ interface WorkspaceContentProps {
   onCreateProject: () => void
   onDeleteProject?: (projectId: string) => void
   onRenameProject?: (projectId: string, name: string) => Promise<void> | void
+  onConfirmSuggestion: (input: {
+    recordId: string
+    decision: 'accepted' | 'accepted_with_edits' | 'rejected' | 'follow_up'
+    note?: string
+    editedDescription?: string
+    projectId: string
+    stageId: string
+  }) => Promise<SuggestionConfirmationResult>
 }
 
 export function WorkspaceContent({
@@ -129,6 +137,7 @@ export function WorkspaceContent({
   onCreateProject,
   onDeleteProject,
   onRenameProject,
+  onConfirmSuggestion,
 }: WorkspaceContentProps) {
   const [latestReportInfo, setLatestReportInfo] = useState<Stage['reportInfo'] | undefined>()
   const [previewItem, setPreviewItem] = useState<EvidenceItem | undefined>()
@@ -321,6 +330,37 @@ export function WorkspaceContent({
               : undefined
           }
           conversationSending={conversationSending}
+          onConfirmExecutionOutput={
+            activeProject && activeStage
+              ? async (toolCall) => {
+                  if (!toolCall.details) return
+                  const suggestion = await onCreateEvidenceSuggestion({
+                    projectId: activeProject,
+                    stageId: activeStage,
+                    title: `确认写回：${toolCall.name}`,
+                    description: toolCall.output ?? `${toolCall.name} 已返回可写入阶段的结果。`,
+                    action: '人工确认后将该过程节点结果登记到阶段数据中。',
+                    impact: '确认后写回当前阶段结果',
+                    risk: 'medium',
+                    source: toolCall.source === 'conversation' ? 'conversation_tool' : 'stage_tool',
+                    context: {
+                      execution_node: {
+                        tool_name: toolCall.name,
+                        output: toolCall.details,
+                        evidence_refs: toolCall.evidenceRefs ?? [],
+                      },
+                    },
+                  })
+                  if (!suggestion.recordId) throw new Error('未能创建阶段写回确认项。')
+                  await onConfirmSuggestion({
+                    recordId: suggestion.recordId,
+                    decision: 'accepted',
+                    projectId: activeProject,
+                    stageId: activeStage,
+                  })
+                }
+              : undefined
+          }
         />
       )
     }

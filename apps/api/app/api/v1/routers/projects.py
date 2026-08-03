@@ -259,6 +259,7 @@ def post_conversation_message(conversation_id: str, request: AppendMessageReques
                 role=invocation.assistant_message.role,
                 content=invocation.assistant_message.content,
                 created_at=invocation.assistant_message.created_at,
+                tool_calls=list(invocation.assistant_message.tool_calls),
             ),
             harness=HarnessSummary(
                 conversation_harness_version=invocation.result.conversation_harness_version,

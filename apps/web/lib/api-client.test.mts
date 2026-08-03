@@ -8,6 +8,7 @@ import {
   buildStageChecklist,
   canSubmitHomeTask,
   mapAutoResearchRecordToSuggestion,
+  mapConversationToolCalls,
   mapRunEventsToConversation,
   mapRunEventsToSuggestions,
   mapRunEventsToToolCalls,
@@ -223,6 +224,50 @@ test('mapRunEvents helpers build workspace state from SSE frames', () => {
     conversation.messages?.[4].content,
     'DeepAgent completed the current run and handed off for confirmation.'
   )
+})
+
+test('mapConversationToolCalls keeps persisted stage output confirmable', () => {
+  const calls = mapConversationToolCalls([{
+    tool_name: 'document_parse',
+    status: 'completed',
+    source: 'stage_run',
+    payload: {
+      success: true,
+      summary: '完成材料读取',
+      output: { pages: 3 },
+      evidence_refs: ['evidence-1'],
+    },
+  }])
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]?.canConfirm, true)
+  assert.deepEqual(calls[0]?.details, { pages: 3 })
+  assert.deepEqual(calls[0]?.evidenceRefs, ['evidence-1'])
+})
+
+test('mapRunEventsToToolCalls preserves process-node details for expandable execution views', () => {
+  const toolCalls = mapRunEventsToToolCalls([
+    {
+      event: 'run.tool_completed',
+      data: {
+        type: 'run.tool_completed',
+        payload: {
+          skill_name: 'scenario_risk_skill',
+          tool_name: 'document_parse',
+          summary: '已读取需求说明并提取流程节点。',
+          raw_output: { process_node_candidates: [{ node_id: 'node-1', name: '材料接收' }] },
+          evidence_refs: ['evidence-1'],
+        },
+        created_at: '2026-08-03T12:00:00Z',
+      },
+    },
+  ])
+
+  assert.equal(toolCalls.length, 1)
+  assert.equal(toolCalls[0].name, 'document_parse')
+  assert.deepEqual(toolCalls[0].details, { process_node_candidates: [{ node_id: 'node-1', name: '材料接收' }] })
+  assert.deepEqual(toolCalls[0].evidenceRefs, ['evidence-1'])
+  assert.equal(toolCalls[0].canConfirm, true)
 })
 
 test('stage status helpers build checklist state for sidebar panels', () => {

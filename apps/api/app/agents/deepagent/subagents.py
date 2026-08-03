@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 
 @dataclass
@@ -26,8 +26,15 @@ def _review_risk(
     stage_name: str,
     tool_results: dict[str, Any] | None = None,
     previous_stage_result: dict[str, Any] | None = None,
+    llm_client: Any = None,
 ) -> SubagentResult:
-    """Stage 1 risk review: validate scenario_summary via stage1_contract."""
+    """Stage 1 risk review: validate scenario_summary via stage1_contract.
+
+    When ``llm_client`` is configured, also asks the LLM for a second-opinion
+    review (``review_risk_semantic``) and merges any ``additional_issues`` into
+    the rule-based issue list.  Unconfigured / LLM-failed runs produce
+    byte-identical output to the pre-upgrade baseline.
+    """
     tool_results = tool_results or {}
     risk_output = tool_results.get("risk_identify", {})
     doc_output = tool_results.get("document_parse", {})
@@ -118,11 +125,37 @@ def _review_risk(
         })
         suggestions.append("将 HITL 等级提升为 strict 或 mandatory")
 
+    # ── LLM second-opinion (optional) ──────────────────────────────
+    # When an LLM client is provided, ask for additional issues that the
+    # rule-based contract validation may have missed.  The merge is
+    # additive — existing issues are preserved.  When the LLM is
+    # unconfigured or returns an empty result, this branch is a no-op.
+    llm_review_added = 0
+    if llm_client is not None:
+        from src.apps.api.app.agents.risk_semantic import review_risk_semantic
+
+        review = review_risk_semantic(
+            scenario_summary,
+            issues,
+            llm_client=llm_client,
+        )
+        if review.source == "llm":
+            for extra in review.additional_issues:
+                issues.append(extra)
+                llm_review_added += 1
+            for sug in review.suggestions:
+                if sug and sug not in suggestions:
+                    suggestions.append(sug)
+
     review_status = "fail" if issues else "pass"
+
+    summary_text = f"风险复核完成：{len(issues)} 个问题，质量分 {audit_score:.2f}"
+    if llm_review_added:
+        summary_text += f"，LLM 第二意见新增 {llm_review_added} 条"
 
     return SubagentResult(
         name="risk_review_subagent",
-        summary=f"风险复核完成：{len(issues)} 个问题，质量分 {audit_score:.2f}",
+        summary=summary_text,
         issues=issues,
         confidence=audit_score,
         review_status=review_status,
@@ -463,10 +496,15 @@ def invoke_subagent(
     stage_name: str,
     tool_results: dict[str, Any] | None = None,
     previous_stage_result: dict[str, Any] | None = None,
+    llm_client: Any = None,
 ) -> SubagentResult:
     """Dispatch to the appropriate review handler.
 
     Falls back to a generic pass result for unknown subagent names.
+    When *llm_client* is provided, it is forwarded to handlers that
+    accept it (currently ``_review_risk`` for second-opinion reviews).
+    Handlers without an ``llm_client`` parameter simply ignore it via
+    the filter below, preserving their original signatures.
     """
     handler = _SUBAGENT_REGISTRY.get(subagent_name)
     if handler is None:
@@ -475,9 +513,20 @@ def invoke_subagent(
             summary=f"未知子代理 {subagent_name}，跳过复核",
             review_status="pass",
         )
-    return handler(
-        goal=goal,
-        stage_name=stage_name,
-        tool_results=tool_results,
-        previous_stage_result=previous_stage_result,
-    )
+
+    import inspect
+    handler_kwargs = {
+        "goal": goal,
+        "stage_name": stage_name,
+        "tool_results": tool_results,
+        "previous_stage_result": previous_stage_result,
+    }
+    # Only forward llm_client when the handler signature accepts it —
+    # keeps older review handlers backward-compatible.
+    try:
+        sig_params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        sig_params = {}
+    if llm_client is not None and "llm_client" in sig_params:
+        handler_kwargs["llm_client"] = llm_client
+    return handler(**handler_kwargs)

@@ -21,7 +21,7 @@ import { Button } from '@/components/ui/button'
 import { type Conversation, type EvidenceItem, type RunStatus, type Stage, type SuggestionCard, type ToolCall } from '@/lib/types'
 import { hasRenderablePayload } from './stage-results/result-utils'
 import { ConversationThread } from './stage/conversation-thread'
-import { RunProgressPanel } from './stage/run-progress-panel'
+import { ExecutionTimeline } from './stage/execution-timeline'
 import { SkillStrip } from './stage/skill-strip'
 import { StageHeader } from './stage/stage-header'
 import { StageExitCard } from './stage/stage-exit-card'
@@ -56,6 +56,7 @@ interface StageWorkspaceProps {
   onPreviewReport?: () => Promise<void> | void
   onLockStage?: () => Promise<void> | void
   onResumeRun?: (runId: string, humanInput?: Record<string, unknown>) => Promise<void> | void
+  onConfirmExecutionOutput?: (toolCall: ToolCall) => Promise<void> | void
   currentRunId?: string
   stageCommandHint?: string
   conversationSending?: boolean
@@ -82,6 +83,7 @@ export function StageWorkspace({
   onPreviewReport,
   onLockStage,
   onResumeRun,
+  onConfirmExecutionOutput,
   currentRunId,
   stageCommandHint,
   conversationSending,
@@ -155,6 +157,8 @@ export function StageWorkspace({
             sending={conversationSending}
             onUploadFiles={onUploadFiles}
             onGenerateReport={onGenerateReport}
+            executionToolCalls={toolCalls}
+            onConfirmExecutionOutput={onConfirmExecutionOutput}
           />
         </div>
       ) : (
@@ -231,7 +235,11 @@ export function StageWorkspace({
                       当前阶段还没有返回能力配置。
                     </div>
                   )}
-                  <RunProgressPanel runStatus={runStatus} toolCalls={toolCalls} />
+                  <ExecutionTimeline
+                    runStatus={runStatus}
+                    toolCalls={toolCalls}
+                    onConfirmOutput={onConfirmExecutionOutput}
+                  />
                 </div>
               </StageWorkbenchPanel>
 

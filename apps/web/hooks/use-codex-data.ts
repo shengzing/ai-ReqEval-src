@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { Conversation, ConversationMessage, EvidenceItem, Project, RunStatus, Stage, StageSkill, SuggestionCard, ToolCall } from '@/lib/types'
+import type { Conversation, ConversationMessage, EvidenceItem, Project, RunStatus, Stage, StageSkill, SuggestionCard, SuggestionConfirmationResult, ToolCall } from '@/lib/types'
 import {
   confirmAutoResearchRecord,
   confirmConversationActionProposal,
@@ -28,6 +28,7 @@ import {
   loadStageSkills,
   lockStage,
   mapRunEventsToConversation,
+  mapConversationToolCalls,
   mapRunEventsToSuggestions,
   mapRunEventsToToolCalls,
   mapRunStatus,
@@ -321,16 +322,16 @@ export function useCodexData() {
       projectId: string
       stageId: string
     }) => {
-      const record = await confirmAutoResearchRecord({
+      const result = await confirmAutoResearchRecord({
         recordId: input.recordId,
         decision: input.decision,
         note: input.note,
         editedDescription: input.editedDescription,
       })
-      setSuggestions((previous) => previous.filter((item) => item.recordId !== record.recordId))
+      setSuggestions((previous) => previous.filter((item) => item.recordId !== result.suggestion.recordId))
       await reloadProjects()
       await hydrateStageContext(input.projectId, input.stageId)
-      return record
+      return result
     },
     [hydrateStageContext, reloadProjects]
   )
@@ -571,6 +572,7 @@ export function useCodexData() {
             role: 'assistant',
             content: response.assistant_message.content,
             created_at: response.assistant_message.created_at,
+            toolCalls: mapConversationToolCalls(response.assistant_message.tool_calls),
             intent: response.harness?.intent,
             harnessWarnings: response.harness?.warnings,
             actionProposals: response.harness?.action_proposals?.map((p) => ({

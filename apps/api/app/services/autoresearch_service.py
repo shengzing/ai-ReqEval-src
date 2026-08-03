@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from uuid import uuid4
 from typing import Any, Optional, Tuple
 
@@ -121,13 +122,34 @@ def _compute_patch_confidence(validation_issues: list[dict], scenario_summary: d
     return min(1.0, confidence)
 
 
-def _build_suggested_patch(issue: dict, scenario_summary: dict) -> Optional[dict]:
+def _build_suggested_patch(
+    issue: dict,
+    scenario_summary: dict,
+    *,
+    llm_client: Any = None,
+) -> Optional[dict]:
     """Build a suggested patch dict from a validation issue.
 
     Returns None if no patch can be automatically suggested.
     For risk_level patches, also cascades to fix dependent fields
     (hitl_level, hitl_rules) to prevent post-patch validation failures.
+
+    When *llm_client* is provided, the LLM semantic-patch path runs first
+    (see ``build_semantic_patch``).  The LLM patch is gated by
+    ``_WHITELISTED_PATCH_FIELDS``; if it fails any gate or returns None,
+    the deterministic hardcoded templates below are used instead.  When
+    *llm_client* is None the LLM path is skipped entirely and output is
+    byte-identical to the pre-upgrade baseline.
     """
+    # ── LLM first: only when an llm_client is wired in ──────────────
+    if llm_client is not None:
+        from src.apps.api.app.agents.risk_semantic import build_semantic_patch
+        llm_patch = build_semantic_patch(
+            issue, scenario_summary, llm_client=llm_client
+        )
+        if llm_patch is not None:
+            return llm_patch
+
     issue_type = issue.get("issue_type", "")
     field = issue.get("field", "")
 
@@ -1591,6 +1613,35 @@ def _sync_evidence_status_from_record(record: AutoResearchRecord, decision: str,
     return updated_ids
 
 
+def _append_confirmed_execution_node(
+    payload: dict[str, Any],
+    record: AutoResearchRecord,
+) -> None:
+    """Store a human-approved process output without overwriting stage fields."""
+    execution_node = record.context.get("execution_node") if isinstance(record.context, dict) else None
+    if not isinstance(execution_node, dict):
+        return
+
+    tool_name = execution_node.get("tool_name")
+    raw_output = execution_node.get("output")
+    evidence_refs = execution_node.get("evidence_refs")
+    entries = payload.get("confirmed_execution_nodes")
+    confirmed_nodes = list(entries) if isinstance(entries, list) else []
+    confirmed_nodes.append(
+        {
+            "confirmation_record_id": record.id,
+            "tool_name": tool_name if isinstance(tool_name, str) else "tool",
+            "output": deepcopy(raw_output) if isinstance(raw_output, dict) else {},
+            "evidence_refs": [item for item in evidence_refs if isinstance(item, str) and item]
+            if isinstance(evidence_refs, list)
+            else [],
+            "source": record.source,
+            "confirmed_at": record.confirmed_at.isoformat() if record.confirmed_at else None,
+        }
+    )
+    payload["confirmed_execution_nodes"] = confirmed_nodes
+
+
 def confirm_autoresearch_record(
     *,
     record_id: str,
@@ -1980,6 +2031,8 @@ def confirm_autoresearch_record(
                 capability_results
             )
 
+        _append_confirmed_execution_node(patched_payload, record)
+
         stage_result = StageResult(
             id=f"stage-result-{uuid4().hex[:8]}",
             project_id=record.project_id,
@@ -1998,7 +2051,11 @@ def confirm_autoresearch_record(
                 "autoresearch_decision": decision,
                 "autoresearch_description": description,
             },
-            summary=f"Applied autoResearch suggestion: {record.title}",
+            summary=(
+                f"Confirmed execution output: {record.title}"
+                if isinstance(record.context.get("execution_node"), dict)
+                else f"Applied autoResearch suggestion: {record.title}"
+            ),
         )
         save_stage_result(stage_result)
         diff_summary = build_stage_result_diff(stage_result, base_result, trigger=decision)
@@ -2059,7 +2116,12 @@ def confirm_autoresearch_record(
         resource_type="autoresearch_record",
         resource_id=record.id,
         run_id=record.run_id,
-        details={"decision": decision, "stage_id": record.stage_id, "stage_result_id": record.stage_result_id},
+        details={
+            "decision": decision,
+            "stage_id": record.stage_id,
+            "stage_result_id": record.stage_result_id,
+            "confirmed_execution_output": isinstance(record.context.get("execution_node"), dict),
+        },
     )
     return record, stage_result
 

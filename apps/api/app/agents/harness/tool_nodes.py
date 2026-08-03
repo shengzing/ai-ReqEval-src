@@ -31,6 +31,7 @@ def run_tool_node(
     *,
     tool_invoker: ToolInvoker | None = None,
     fail_fast: bool = False,
+    llm_client: Any = None,
 ) -> HarnessState:
     invoker = tool_invoker or invoke_tool
     planned_tools = list(state.get("plan", {}).get("tool_names", []))
@@ -49,6 +50,7 @@ def run_tool_node(
             evidence_items=state.get("evidence_items", []),
             vision_results=state.get("vision_results", []),
             previous_stage_result=prior_stage_result,
+            llm_client=llm_client,
         )
     except HTTPException as exc:
         failures = list(state.get("tool_failures", []))

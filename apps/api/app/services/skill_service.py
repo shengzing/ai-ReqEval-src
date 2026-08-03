@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from uuid import uuid4
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import HTTPException, status
 
@@ -138,8 +138,16 @@ def _risk_binding_keywords(description: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(keywords))
 
 
-def _bind_stage_one_risk_and_hitl_to_nodes(summary: dict) -> dict:
-    """Bind risk items, risk matrix rows, and HITL rules to process node IDs."""
+def _bind_stage_one_risk_and_hitl_to_nodes(summary: dict, *, llm_client: Any = None) -> dict:
+    """Bind risk items, risk matrix rows, and HITL rules to process node IDs.
+
+    When ``llm_client`` is configured, uses LLM-first semantic binding
+    (``bind_risk_to_node_semantic``) with keyword fallback. When unconfigured,
+    falls back to the pre-upgrade ``_risk_binding_keywords`` +
+    ``_find_process_node_id`` logic for byte-identical output.
+    """
+    from src.apps.api.app.agents.risk_semantic import bind_risk_to_node_semantic
+
     process_nodes = [node for node in summary.get("process_nodes", []) if isinstance(node, dict)]
     if not process_nodes:
         return summary
@@ -151,14 +159,22 @@ def _bind_stage_one_risk_and_hitl_to_nodes(summary: dict) -> dict:
             risk_items.append(item)
             continue
         updated = dict(item)
-        description = " ".join(
-            str(updated.get(field, ""))
-            for field in ("description", "impact", "audit_need", "mitigation")
-        )
-        node_id = updated.get("node_id") or _find_process_node_id(
-            process_nodes,
-            preferred_keywords=_risk_binding_keywords(description),
-        )
+        if updated.get("node_id"):
+            # Preserve an existing binding (e.g. set by the LLM synthesis
+            # candidate) instead of overwriting it.
+            node_id = updated["node_id"]
+        else:
+            description = " ".join(
+                str(updated.get(field, ""))
+                for field in ("description", "impact", "audit_need", "mitigation")
+            )
+            binding = bind_risk_to_node_semantic(
+                description,
+                process_nodes,
+                llm_client=llm_client,
+                preferred_keywords=_risk_binding_keywords(description),
+            )
+            node_id = binding.node_id
         updated["node_id"] = node_id
         if updated.get("risk_id"):
             risk_node_by_id[str(updated["risk_id"])] = node_id
@@ -170,16 +186,30 @@ def _bind_stage_one_risk_and_hitl_to_nodes(summary: dict) -> dict:
             risk_matrix.append(row)
             continue
         updated = dict(row)
-        row_text = " ".join(str(updated.get(field, "")) for field in ("item", "control"))
-        risk_id = str(updated.get("risk_id", ""))
-        updated["node_id"] = updated.get("node_id") or risk_node_by_id.get(risk_id) or _find_process_node_id(
-            process_nodes,
-            preferred_keywords=_risk_binding_keywords(row_text),
-        )
+        if updated.get("node_id"):
+            node_id = updated["node_id"]
+        else:
+            row_text = " ".join(str(updated.get(field, "")) for field in ("item", "control"))
+            risk_id = str(updated.get("risk_id", ""))
+            node_id = risk_node_by_id.get(risk_id) or bind_risk_to_node_semantic(
+                row_text,
+                process_nodes,
+                llm_client=llm_client,
+                preferred_keywords=_risk_binding_keywords(row_text),
+            ).node_id
+        updated["node_id"] = node_id
         risk_matrix.append(updated)
 
     hitl_rules = []
-    review_node_id = _find_process_node_id(process_nodes, preferred_keywords=("复核", "合规", "确认"))
+    review_binding = bind_risk_to_node_semantic(
+        "复核 合规 确认 审批",
+        process_nodes,
+        llm_client=llm_client,
+        preferred_keywords=("复核", "合规", "确认"),
+    )
+    review_node_id = review_binding.node_id or _find_process_node_id(
+        process_nodes, preferred_keywords=("复核", "合规", "确认")
+    )
     for rule in summary.get("hitl_rules", []):
         if not isinstance(rule, dict):
             hitl_rules.append(rule)
@@ -418,7 +448,14 @@ def _build_risk_grading(
     return phase_b
 
 
-def _build_stage_one_summary(*, goal: str, stage_name: str, tool_payload: dict, vision_results: list[dict]) -> dict:
+def _build_stage_one_summary(
+    *,
+    goal: str,
+    stage_name: str,
+    tool_payload: dict,
+    vision_results: list[dict],
+    llm_client: Any = None,
+) -> dict:
     """Build scenario_summary from evidence-driven tool outputs.
 
     Thin wrapper over Phase A (``_build_scenario_deconstruction``) and Phase B
@@ -436,7 +473,7 @@ def _build_stage_one_summary(*, goal: str, stage_name: str, tool_payload: dict, 
         tool_payload=tool_payload,
         vision_results=vision_results,
     )
-    return _bind_stage_one_risk_and_hitl_to_nodes({**phase_a, **phase_b})
+    return _bind_stage_one_risk_and_hitl_to_nodes({**phase_a, **phase_b}, llm_client=llm_client)
 
 
 def _build_stage_two_summary(*, goal: str, stage_name: str, tool_payload: dict, previous_stage_result: dict | None) -> dict:
@@ -1330,6 +1367,9 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
                     "skill_name": skill.name,
                     "tool_name": tool_name,
                     "summary": tool_result_item.get("summary", ""),
+                    "raw_output": tool_result_item.get("raw_output", {}),
+                    "evidence_refs": tool_result_item.get("evidence_refs", []),
+                    "warnings": tool_result_item.get("warnings", []),
                 },
             )
         else:
@@ -1453,11 +1493,19 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             stage_name=stage.name,
             tool_payload=tool_payload,
             vision_results=vision_results,
+            llm_client=llm_client,
         )
         synthesized_payload = dict(harness_state.get("synthesized_payload", {}))
         scenario_summary, llm_synthesis_issues, synthesis_source = _selective_merge_stage_one_llm_candidate(
             fallback_summary=fallback_summary,
             candidate=synthesized_payload.get("scenario_summary_candidate"),
+        )
+        # Re-run node binding AFTER the selective merge so risk_items /
+        # hitl_rules adopted from the LLM candidate also carry node_id.
+        # This preserves the authoritative node_id even when the merge
+        # replaced the fallback's bound lists.
+        scenario_summary = _bind_stage_one_risk_and_hitl_to_nodes(
+            scenario_summary, llm_client=llm_client
         )
         current_result.result_payload["harness"]["synthesis"] = {
             "source": synthesis_source,

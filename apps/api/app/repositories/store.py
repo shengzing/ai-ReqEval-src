@@ -76,6 +76,8 @@ def _conversation_message_from_doc(doc: dict[str, Any]) -> ConversationMessage:
         run_id=doc.get("run_id"),
         action_proposals=list(doc.get("action_proposals", [])),
         harness_warnings=list(doc.get("harness_warnings", [])),
+        tool_calls=list(doc.get("tool_calls", [])),
+        process_only=bool(doc.get("process_only", False)),
     )
 
 

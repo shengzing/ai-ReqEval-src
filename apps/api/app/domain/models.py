@@ -26,6 +26,9 @@ class ConversationMessage:
     run_id: Optional[str] = None  # source Run (if any)
     action_proposals: list[dict[str, Any]] = field(default_factory=list)
     harness_warnings: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    # Process-only entries render execution evidence without an empty chat bubble.
+    process_only: bool = False
 
 
 @dataclass

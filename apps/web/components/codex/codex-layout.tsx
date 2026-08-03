@@ -332,6 +332,11 @@ export function CodexLayout() {
             onStartTask={startTask}
             onUploadEvidenceFiles={uploadEvidenceFiles}
             onCreateEvidenceSuggestion={createEvidenceSuggestion}
+            onConfirmSuggestion={async (input) => {
+              const result = await confirmSuggestion(input)
+              if (result.stageResultPayload) setStageResultPayload(result.stageResultPayload)
+              return result
+            }}
             onParseEvidenceFile={parseEvidenceFile}
             onVisionParseEvidenceFile={visionParseEvidenceFile}
             onGenerateReport={generateProjectReport}

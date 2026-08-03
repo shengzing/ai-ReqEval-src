@@ -179,6 +179,45 @@ def _select_owner_role(node_name: str, participants: list[dict]) -> str:
     return roles[0]
 
 
+def _infer_scenario_type(
+    *,
+    ai_scope: str,
+    combined_text: str,
+    llm_client: Any = None,
+) -> str:
+    """Infer the AI task category for a scenario.
+
+    LLM-first: when an LLM client is configured, ask the extractor's
+    scenario_type. Fallback: the pre-upgrade keyword inference on ai_scope.
+    """
+    from src.apps.api.app.agents.risk_semantic.models import RiskBrief
+    from src.apps.api.app.agents.risk_semantic.extractor import _normalize_scenario_type
+
+    if llm_client is not None:
+        try:
+            from src.apps.api.app.agents.risk_semantic import extract_risk_artifacts
+
+            brief = RiskBrief(
+                scenario_name=ai_scope,
+                combined_text=combined_text,
+            )
+            report = extract_risk_artifacts(
+                brief, evidence_snippets={}, llm_client=llm_client,
+            )
+            if report.source == "llm" and report.scenario_type:
+                return report.scenario_type
+        except Exception:
+            # Fall through to keyword inference
+            pass
+
+    # Pre-upgrade keyword inference (line 400 behavior)
+    if any(kw in ai_scope for kw in ["摘要", "生成", "草拟"]):
+        return "content_generation"
+    if any(kw in ai_scope for kw in ["汇总", "提取", "识别"]):
+        return "understanding_analysis"
+    return "decision_support"
+
+
 def _enrich_process_nodes(
     nodes: list[dict],
     *,
@@ -348,6 +387,7 @@ def document_parse_tool(
     evidence_items: list[dict] | None = None,
     vision_results: list[dict] | None = None,
     previous_stage_result: dict | None = None,
+    llm_client: Any = None,
 ) -> ToolResult:
     evidence_items = evidence_items or []
     all_refs: list[str] = []
@@ -394,13 +434,9 @@ def document_parse_tool(
     if heading_match:
         scenario_name_candidates.append(heading_match.group(1).strip())
 
-    # Scenario type: infer from AI scope
-    scenario_type = "decision_support"
+    # Scenario type: infer from AI scope (LLM-first when available, keyword fallback)
     ai_scope = fields.get("ai_scope", "")
-    if any(kw in ai_scope for kw in ["摘要", "生成", "草拟"]):
-        scenario_type = "content_generation"
-    elif any(kw in ai_scope for kw in ["汇总", "提取", "识别"]):
-        scenario_type = "understanding_analysis"
+    scenario_type = _infer_scenario_type(ai_scope=ai_scope, combined_text=combined_text, llm_client=llm_client)
 
     # Boundary
     in_scope = _split_semicolon_list(fields.get("ai_scope", ""))
@@ -438,14 +474,20 @@ def document_parse_tool(
 
     if process_text:
         process_node_candidates = _build_process_node_candidates(process_text, primary_evidence_id)
-        process_node_candidates = _enrich_process_nodes(
+        # LLM-first semantic enrichment (owner_role / human_review_required / output)
+        # with keyword fallback identical to the pre-upgrade _enrich_process_nodes.
+        from src.apps.api.app.agents.risk_semantic import enrich_process_nodes_semantic
+
+        enrich_report = enrich_process_nodes_semantic(
             process_node_candidates,
+            participants,
+            llm_client=llm_client,
             input_objects=input_objects,
             output_objects=output_objects,
-            participants=participants,
             manual_review_points=manual_review_points,
             audit_requirements=audit_requirements,
         )
+        process_node_candidates = enrich_report.nodes
 
     # Prohibited conditions (from "不让AI做" field)
     prohibited_conditions = []
@@ -493,6 +535,7 @@ def risk_identify_tool(
     evidence_items: list[dict] | None = None,
     vision_results: list[dict] | None = None,
     previous_stage_result: dict | None = None,
+    llm_client: Any = None,
 ) -> ToolResult:
     from src.apps.api.app.services.stage1_contract import (
         HITL_LEVELS,
@@ -609,7 +652,8 @@ def risk_identify_tool(
 
     # Attempt semantic classification with LLM client
     from src.apps.api.app.agents.harness.llm import HarnessLLMClient
-    llm_client = HarnessLLMClient()
+    _injected_llm_client = llm_client
+    llm_client = _injected_llm_client if (_injected_llm_client is not None and getattr(_injected_llm_client, "is_configured", lambda: False)()) else HarnessLLMClient()
     semantic_result = classify_risk_semantic(brief, llm_client=llm_client)
 
     if semantic_result.source == "llm":
@@ -648,57 +692,57 @@ def risk_identify_tool(
                 boundary_flag=False,
             )
 
-    # ── Extract specific risk items from evidence ─────────────────────
+    # ── Extract risk items / fatal errors / evidence bindings ──────────
+    # LLM-first: ask the extractor for risk_items + fatal_errors +
+    # evidence_bindings + scenario_type in one call. Fallback is byte-identical
+    # to the pre-upgrade regex/keyword block below.
+    from src.apps.api.app.agents.risk_semantic import extract_risk_artifacts
+    from src.apps.api.app.agents.risk_semantic.models import RiskBrief as _RiskBrief
 
-    risk_items: list[dict] = []
-    risk_counter = 0
+    artifacts_brief = _RiskBrief(
+        scenario_name=scenario_name,
+        combined_text=combined_text,
+        known_risk_points=known_risk_points,
+        prohibited_conditions=prohibited_conditions,
+        boundary_flag=boundary_flag,
+    )
+    artifacts = extract_risk_artifacts(
+        artifacts_brief,
+        evidence_snippets,
+        llm_client=llm_client,
+        risk_level=risk_level,
+        primary_evidence_id=primary_evidence_id,
+    )
 
-    # Parse "常见异常" and "出错最严重后果" as risk items using a unified pattern
-    risk_label_matches = list(re.finditer(
-        r"^(常见异常|出错最严重后果)[：:]\s*(.+)$",
-        combined_text,
-        re.MULTILINE,
-    ))
+    if artifacts.source == "llm":
+        risk_items = list(artifacts.risk_items)
+        # evidence_bindings already attached to each item's evidence_refs by
+        # the extractor; fall back to keyword-overlap binding for any item
+        # that came back empty.
+        for item in risk_items:
+            if not item.get("evidence_refs"):
+                rid = item.get("risk_id", "")
+                ev = artifacts.evidence_bindings.get(rid)
+                if ev:
+                    item["evidence_refs"] = list(ev)
+                else:
+                    item["evidence_refs"] = [_find_best_evidence(
+                        item.get("description", ""), evidence_items, evidence_snippets
+                    )]
+        fatal_errors = list(artifacts.fatal_errors)
+        for fe in fatal_errors:
+            if not fe.get("evidence_refs"):
+                fe["evidence_refs"] = [_find_best_evidence(
+                    fe.get("error", ""), evidence_items, evidence_snippets
+                )]
+    else:
+        # Fallback path — reuse the extractor's own fallback (byte-identical
+        # to the pre-upgrade block) so we have a single source of truth.
+        risk_items = list(artifacts.risk_items)
+        fatal_errors = list(artifacts.fatal_errors)
 
-    for match in risk_label_matches:
-        label_kind = match.group(1)
-        body = match.group(2)
-        for desc in _split_semicolon_list(body):
-            risk_counter += 1
-            # P1-evidence: keyword-overlap-based evidence binding
-            best_ev = _find_best_evidence(desc, evidence_items, evidence_snippets)
-            if label_kind == "出错最严重后果":
-                risk_items.append({
-                    "risk_id": f"risk-{risk_counter}",
-                    "node_id": "",
-                    "description": desc,
-                    "severity": "high" if risk_level == "L3" else "medium",
-                    "likelihood": "low",
-                    "impact": desc,
-                    "owner_role": "",
-                    "mitigation": "",
-                    "audit_need": "",
-                    "risk_level": risk_level,
-                    "evidence_refs": [best_ev],
-                })
-            else:
-                risk_items.append({
-                    "risk_id": f"risk-{risk_counter}",
-                    "node_id": "",
-                    "description": desc,
-                    "severity": "medium",
-                    "likelihood": "medium",
-                    "impact": "",
-                    "owner_role": "",
-                    "mitigation": "",
-                    "audit_need": "",
-                    "risk_level": risk_level,
-                    "evidence_refs": [best_ev],
-                })
-
-    # Ensure at least one risk item exists
+    # Ensure at least one risk item exists (mirrors pre-upgrade guarantee)
     if not risk_items:
-        risk_counter += 1
         risk_items.append({
             "risk_id": "risk-1",
             "node_id": "",
@@ -770,18 +814,9 @@ def risk_identify_tool(
             })
 
     # ── Fatal errors ──────────────────────────────────────────────────
-
-    fatal_errors: list[dict] = []
-    if risk_level == "L3":
-        fatal_keywords = ["漏报风险", "误伤客户", "审计追责", "延误处置"]
-        for kw in fatal_keywords:
-            if kw in combined_text:
-                best_ev = _find_best_evidence(kw, evidence_items, evidence_snippets)
-                fatal_errors.append({
-                    "error": kw,
-                    "impact": f"{kw}将导致严重后果",
-                    "evidence_refs": [best_ev],
-                })
+    # `fatal_errors` was already populated by extract_risk_artifacts above
+    # (LLM-first with the 4-keyword fallback baked into the extractor when
+    # risk_level == L3). The pre-upgrade inline block is no longer needed here.
 
     # ── Audit requirements ────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Home, Plus, Search, Settings } from 'lucide-react'
+import { Home, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -49,6 +49,7 @@ export function LeftSidebar({
     new Set()
   )
   const [searchQuery, setSearchQuery] = useState('')
+  const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
     if (activeProject) {
@@ -99,86 +100,134 @@ export function LeftSidebar({
     : projects
 
   return (
-    <div className="flex h-auto max-h-[42vh] w-full shrink-0 flex-col border-b border-border bg-sidebar lg:h-full lg:max-h-none lg:min-w-[320px] lg:w-[320px] lg:border-b-0 lg:border-r">
+    <div
+      className={cn(
+        'flex h-auto max-h-[42vh] w-full shrink-0 flex-col border-b border-border bg-sidebar lg:h-full lg:max-h-none lg:border-b-0 lg:border-r lg:transition-[width] lg:duration-200',
+        collapsed ? 'lg:w-[68px]' : 'lg:min-w-[320px] lg:w-[320px]'
+      )}
+    >
       {/* App branding / Home */}
-      <button
-        type="button"
-        onClick={onGoHome}
-        className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold text-sidebar-foreground transition-colors hover:bg-sidebar-accent/50"
-      >
-        <Home className="size-4" />
-        <span>AI-ReqEval</span>
-      </button>
-
-      {/* Search */}
-      <div className="p-3">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="搜索项目、阶段或对话..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="h-8 bg-sidebar-accent/50 pl-8 text-sm"
-          />
-        </div>
-      </div>
-
-      {/* Projects Section Header */}
-      <div className="flex items-center justify-between px-3 py-1.5">
-        <span className="text-xs font-medium text-sidebar-foreground/50">项目</span>
+      <div className="flex items-center border-b border-border">
+        <button
+          type="button"
+          onClick={onGoHome}
+          title="返回首页"
+          className="flex min-w-0 flex-1 items-center gap-2 px-4 py-3 text-sm font-semibold text-sidebar-foreground transition-colors hover:bg-sidebar-accent/50"
+        >
+          <Home className="size-4 shrink-0" />
+          <span className={cn(collapsed && 'lg:hidden')}>AI-ReqEval</span>
+        </button>
         <Button
+          type="button"
           variant="ghost"
           size="icon-sm"
-          className="size-6 text-sidebar-foreground/60 hover:text-sidebar-foreground"
-          onClick={onCreateProject}
-          aria-label="创建项目"
+          onClick={() => setCollapsed((value) => !value)}
+          aria-label={collapsed ? '展开左侧工具栏' : '收起左侧工具栏'}
+          title={collapsed ? '展开左侧工具栏' : '收起左侧工具栏'}
+          className="mr-2 hidden size-7 text-sidebar-foreground/65 hover:text-sidebar-foreground lg:inline-flex"
         >
-          <Plus className="size-3.5" />
+          {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
         </Button>
       </div>
 
-      {/* Project Tree */}
-      <ScrollArea className="flex-1">
-        <ProjectTree
-          projects={filteredProjects}
-          expandedProjects={expandedProjects}
-          expandedStages={expandedStages}
-          activeProject={activeProject}
-          activeStage={activeStage}
-          activeConversation={activeConversation}
-          searchQuery={searchQuery}
-          onToggleProject={toggleProject}
-          onToggleStage={toggleStage}
-          onSelectProject={onProjectChange}
-          onSelectStage={onStageChange}
-          onSelectConversation={onConversationChange}
-          onCreateConversation={onCreateConversation}
-          onDeleteConversation={onDeleteConversation}
-          onDeleteProject={onDeleteProject}
-        />
-      </ScrollArea>
+      {collapsed ? (
+        <div className="hidden flex-1 flex-col items-center gap-2 py-3 lg:flex">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="size-9 text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            onClick={onCreateProject}
+            aria-label="创建项目"
+            title="创建项目"
+          >
+            <Plus className="size-4" />
+          </Button>
+          <div className="mt-auto border-t border-border pt-2">
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              disabled={!activeProject}
+              aria-label="设置"
+              title={activeProject ? '设置' : '请先选择一个项目再进入设置'}
+              className="flex size-9 items-center justify-center rounded-md text-sidebar-foreground/75 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              <Settings className="size-4" />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Search */}
+          <div className="p-3">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="搜索项目、阶段或对话..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-8 bg-sidebar-accent/50 pl-8 text-sm"
+              />
+            </div>
+          </div>
 
-      {/* Settings at Bottom */}
-      <div className="border-t border-border p-2">
-        <button
-          type="button"
-          onClick={onOpenSettings}
-          disabled={!activeProject}
-          aria-pressed={settingsActive === true}
-          aria-disabled={!activeProject}
-          title={activeProject ? undefined : '请先选择一个项目再进入设置'}
-          className={cn(
-            'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
-            settingsActive
-              ? 'bg-sidebar-accent text-sidebar-foreground'
-              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-            !activeProject && 'cursor-not-allowed opacity-40 hover:bg-transparent'
-          )}
-        >
-          <Settings className="size-4" />
-          <span>设置</span>
-        </button>
-      </div>
+          {/* Projects Section Header */}
+          <div className="flex items-center justify-between px-3 py-1.5">
+            <span className="text-xs font-medium text-sidebar-foreground/50">项目</span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="size-6 text-sidebar-foreground/60 hover:text-sidebar-foreground"
+              onClick={onCreateProject}
+              aria-label="创建项目"
+            >
+              <Plus className="size-3.5" />
+            </Button>
+          </div>
+
+          {/* Project Tree */}
+          <ScrollArea className="flex-1">
+            <ProjectTree
+              projects={filteredProjects}
+              expandedProjects={expandedProjects}
+              expandedStages={expandedStages}
+              activeProject={activeProject}
+              activeStage={activeStage}
+              activeConversation={activeConversation}
+              searchQuery={searchQuery}
+              onToggleProject={toggleProject}
+              onToggleStage={toggleStage}
+              onSelectProject={onProjectChange}
+              onSelectStage={onStageChange}
+              onSelectConversation={onConversationChange}
+              onCreateConversation={onCreateConversation}
+              onDeleteConversation={onDeleteConversation}
+              onDeleteProject={onDeleteProject}
+            />
+          </ScrollArea>
+
+          {/* Settings at Bottom */}
+          <div className="border-t border-border p-2">
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              disabled={!activeProject}
+              aria-pressed={settingsActive === true}
+              aria-disabled={!activeProject}
+              title={activeProject ? undefined : '请先选择一个项目再进入设置'}
+              className={cn(
+                'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
+                settingsActive
+                  ? 'bg-sidebar-accent text-sidebar-foreground'
+                  : 'text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                !activeProject && 'cursor-not-allowed opacity-40 hover:bg-transparent'
+              )}
+            >
+              <Settings className="size-4" />
+              <span>设置</span>
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }

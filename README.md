@@ -90,31 +90,27 @@ apps/api/
 
 ### 启动命令
 
-> **Python 要求 ≥3.11**（官方 `deepagents==0.6.12` 强制）。统一用 `src/apps/api/.venv/bin/python`，禁止回退 shell 默认 `python`。命令均在各自代码目录下执行。
+> **Python ≥3.11**（官方 `deepagents==0.6.12` 强制）。统一用 `src/apps/api/.venv/bin/python`，启动脚本拒绝回退 shell 默认 `python`。命令均在 `src/apps/api` 下执行。
 
 ```bash
-# 1) 安装/同步锁定依赖（唯一引导命令，在仓库根执行）
+# 1) 安装/同步锁定依赖（仓库根执行，唯一引导命令）
 uv sync --locked --project src/apps/api --group dev --no-install-project --python 3.11
 
-# 2) 就绪检查（验证 Python 版本 + deepagents/fastapi/langgraph 等导入 + Mongo ping）
+# 2) 就绪检查：Python 版本 + 依赖导入 + Mongo ping
 cd src/apps/api && .venv/bin/python ../../scripts/check_dev_ready.py
 
-# 3) 启动 API 开发服务器（默认端口 8899，脚本会校验环境，拒绝用错 Python）
+# 3) 启动 API 开发服务器（默认 :8899）
 cd src/apps/api && ../../scripts/start_api_dev.sh
-# 等价于：.venv/bin/
-python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8899 --reload
 
-# 4) 跑测试
+# 4) 跑测试（单跑 harness：追加 tests/test_deepagents_harness_provider.py tests/test_langgraph_harness.py）
 cd src/apps/api && .venv/bin/python -m pytest tests/ -q
-#   单跑 harness 相关：
-cd src/apps/api && .venv/bin/python -m pytest tests/test_deepagents_harness_provider.py tests/test_langgraph_harness.py -q
 ```
 
 **切换 Harness 版本**（环境变量覆盖全局默认，或经 `StageSkillProfile` 按 stage 配置）：
 
 ```bash
-export AGENT_HARNESS_VERSION=deepagents-v1          # 阶段任务 Harness
-export CONVERSATION_HARNESS_VERSION=conversation-deepagents-v1  # 对话 Harness（已是默认）
+export AGENT_HARNESS_VERSION=deepagents-v1                      # 阶段任务 Harness
+export CONVERSATION_HARNESS_VERSION=conversation-deepagents-v1 # 对话 Harness（已是默认）
 ```
 
 **配置与 `.env`**：API 进程启动时由 `apps/api/app/core/config.py` 调 `load_dotenv(src/apps/api/.env, override=False)`，即 **shell 环境变量优先、`.env` 兜底**。`get_settings()` 用 `@lru_cache` 缓存，测试改 env 后需 `get_settings.cache_clear()`。
@@ -157,7 +153,7 @@ npm run build        # 产出静态站点到 out/，供后端托管
 
 ```bash
 ../../scripts/start_web_dev.sh     # 开发
-../../scripts/build_web_static.sh  # 构建静态产物供 API 托管
+../../scripts/build_web_static.sh # 构建静态产物供 API 托管
 ```
 
 前端通过 `lib/api-client.ts` 调用后端 REST/SSE 接口，默认 `http://127.0.0.1:8899/api/v1`，可用 `NEXT_PUBLIC_API_BASE_URL` 覆盖；契约见 `src/contracts/`。

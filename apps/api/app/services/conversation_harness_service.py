@@ -106,6 +106,7 @@ def invoke_conversation_harness(
                 for record in action_records
             ],
             harness_warnings=list(result.warnings),
+            tool_calls=list(result.tool_calls),
         )
     except Exception:
         # A proposal without a linked assistant message cannot be discovered

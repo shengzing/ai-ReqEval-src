@@ -62,6 +62,8 @@ export interface ApiConversation {
       status: string
     }>
     harness_warnings?: Array<Record<string, unknown>>
+    tool_calls?: Array<Record<string, unknown>>
+    process_only?: boolean
   }>
 }
 
@@ -319,6 +321,7 @@ export interface ApiAssistantMessage {
   role: 'assistant'
   content: string
   created_at: string
+  tool_calls?: Array<Record<string, unknown>>
 }
 
 /** 对话 Harness 的摘要信息，附在 AppendMessageResponse.harness */

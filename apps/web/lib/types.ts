@@ -32,6 +32,7 @@ export interface ConversationMessage {
   bullets?: string[]
   /** assistant 消息可能附带工具调用过程（仅运行模式） */
   toolCalls?: ToolCall[]
+  processOnly?: boolean
   /** assistant 消息可能附带 action proposals（对话 harness 返回） */
   actionProposals?: ConversationActionProposal[]
   /** 对话 harness 的 intent 摘要（仅 assistant） */
@@ -134,6 +135,11 @@ export interface SuggestionCard {
   status?: 'pending' | 'accepted' | 'accepted_with_edits' | 'rejected' | 'follow_up'
 }
 
+export interface SuggestionConfirmationResult {
+  suggestion: SuggestionCard
+  stageResultPayload?: Record<string, unknown>
+}
+
 export interface EvidenceItem {
   id: string
   name: string
@@ -173,4 +179,8 @@ export interface ToolCall {
   status: 'running' | 'completed' | 'failed'
   duration?: string
   output?: string
+  details?: Record<string, unknown>
+  evidenceRefs?: string[]
+  source?: 'stage_run' | 'conversation'
+  canConfirm?: boolean
 }

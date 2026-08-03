@@ -99,6 +99,8 @@ class ConversationMessageResponse(BaseModel):
     run_id: Optional[str] = None
     action_proposals: list[dict] = Field(default_factory=list)
     harness_warnings: list[dict] = Field(default_factory=list)
+    tool_calls: list[dict] = Field(default_factory=list)
+    process_only: bool = False
 
 
 class ConversationResponse(BaseModel):
@@ -284,6 +286,7 @@ class AssistantHarnessMessageResponse(BaseModel):
     role: str
     content: str
     created_at: datetime
+    tool_calls: list[dict] = Field(default_factory=list)
 
 
 class ActionProposalSummary(BaseModel):

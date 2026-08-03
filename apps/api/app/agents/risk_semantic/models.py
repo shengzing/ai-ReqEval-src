@@ -173,3 +173,86 @@ class EvidenceChainReport:
     results: list[EvidenceVerificationResult] = field(default_factory=list)
     overall_score: float = 0.0
     unverified_items: list[str] = field(default_factory=list)
+
+
+# ── Risk artifacts extraction models (extractor) ──────────────────────────
+
+
+@dataclass
+class RiskArtifactsReport:
+    """Result of semantic risk-artifact extraction (risk items / fatal errors /
+    evidence bindings / scenario_type).
+
+    Attributes:
+        risk_items: List of risk item dicts (description, severity, risk_level...).
+        fatal_errors: List of fatal error dicts (error, impact, evidence_refs).
+        evidence_bindings: Mapping risk_id -> list of evidence_ids that support it.
+        scenario_type: AI task category — one of the four core task types.
+        reasoning: Human-readable reasoning for the extraction.
+        source: "llm" when LLM was used, "fallback" for deterministic fallback.
+    """
+
+    risk_items: list[dict[str, Any]] = field(default_factory=list)
+    fatal_errors: list[dict[str, Any]] = field(default_factory=list)
+    evidence_bindings: dict[str, list[str]] = field(default_factory=dict)
+    scenario_type: str = ""
+    reasoning: str = ""
+    source: str = "fallback"
+
+
+# ── Node enrichment models (node_enricher) ──────────────────────────────────
+
+
+@dataclass
+class NodeEnrichmentReport:
+    """Result of semantic process-node enrichment (owner_role /
+    human_review_required / output binding).
+
+    Attributes:
+        nodes: Enriched process node list (same shape as input nodes plus
+            owner_role/human_review_required/output populated).
+        source: "llm" when LLM was used, "fallback" for deterministic fallback.
+    """
+
+    nodes: list[dict[str, Any]] = field(default_factory=list)
+    source: str = "fallback"
+
+
+# ── Risk → process-node binding models (binder) ──────────────────────────────
+
+
+@dataclass
+class NodeBindingResult:
+    """Result of binding a risk item / HITL rule to a process node.
+
+    Attributes:
+        node_id: The target process node's node_id, or "" when no node matches.
+        source: "llm" when LLM was used, "fallback" for deterministic fallback.
+    """
+
+    node_id: str = ""
+    source: str = "fallback"
+
+
+# ── Risk review second-opinion models (reviewer) ────────────────────────────
+
+
+@dataclass
+class RiskReviewResult:
+    """Result of LLM second-opinion risk review.
+
+    Attributes:
+        additional_issues: Extra issues the LLM flagged beyond the rule-based
+            contract validation. Each item mirrors the stage1_contract issue
+            shape (issue_type, field, severity, message, suggested_action).
+        suggestions: Human-readable review suggestions.
+        confidence: Reviewer confidence in [0, 1].
+        reasoning: Human-readable reasoning.
+        source: "llm" when LLM was used, "fallback" for the no-op fallback.
+    """
+
+    additional_issues: list[dict[str, Any]] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    reasoning: str = ""
+    source: str = "fallback"

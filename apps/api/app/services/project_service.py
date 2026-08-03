@@ -531,6 +531,57 @@ def _action_proposal_summary(item: dict) -> dict:
 
 def _run_event_to_conversation_message(event) -> Optional[ConversationMessage]:
     event_type = getattr(event, "type", None)
+    process_event_types = {
+        "run.tool_started",
+        "run.tool_completed",
+        "run.tool_failed",
+        "run.skill_started",
+        "run.skill_completed",
+        "run.skill_failed",
+        "run.harness_planned",
+        "run.harness_decision",
+        "run.harness_fallback",
+    }
+    if event_type in process_event_types:
+        payload = event.payload or {}
+        node_name = payload.get("tool_name") or payload.get("skill_name") or payload.get("skill_id")
+        if not isinstance(node_name, str) or not node_name.strip():
+            node_name = "LangGraph Harness" if event_type.startswith("run.harness") else "tool"
+        failed = event_type.endswith("_failed") or event_type == "run.harness_fallback" or payload.get("status") == "failed"
+        summary = payload.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            if failed:
+                summary = "执行失败"
+            elif event_type.endswith("_started"):
+                summary = "正在执行"
+            else:
+                summary = "执行完成"
+        raw_output = payload.get("raw_output")
+        output = raw_output if isinstance(raw_output, dict) else {}
+        evidence_refs = payload.get("evidence_refs")
+        references = [item for item in evidence_refs if isinstance(item, str) and item] if isinstance(evidence_refs, list) else []
+        return ConversationMessage(
+            role="assistant",
+            content=summary.strip(),
+            created_at=getattr(event, "created_at", None) or utcnow(),
+            source_event_id=getattr(event, "id", None),
+            run_id=getattr(event, "run_id", None),
+            process_only=True,
+            tool_calls=[
+                {
+                    "tool_name": node_name.strip(),
+                    "status": "failed" if failed else ("running" if event_type.endswith("_started") else "completed"),
+                    "reason": summary.strip(),
+                    "source": "stage_run",
+                    "payload": {
+                        "success": not failed,
+                        "summary": summary.strip(),
+                        "output": output,
+                        "evidence_refs": references,
+                    },
+                }
+            ],
+        )
     if event_type not in {"run.step", "run.suggestion", "run.waiting_user", "run.completed", "run.failed"}:
         return None
     payload = event.payload or {}
@@ -581,6 +632,7 @@ def append_conversation_message(
     source_event_id: Optional[str] = None,
     action_proposals: Optional[list[dict]] = None,
     harness_warnings: Optional[list[dict]] = None,
+    tool_calls: Optional[list[dict]] = None,
 ) -> ConversationMessage:
     """Append a message to an existing conversation and persist it.
 
@@ -603,6 +655,7 @@ def append_conversation_message(
         run_id=run_id,
         action_proposals=[_action_proposal_summary(item) for item in action_proposals or []],
         harness_warnings=list(harness_warnings or []),
+        tool_calls=list(tool_calls or []),
     )
     conversation.messages.append(message)
     conversation.updated_at = utcnow()

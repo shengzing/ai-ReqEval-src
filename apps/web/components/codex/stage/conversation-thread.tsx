@@ -6,8 +6,9 @@ import { AlertTriangle, MessageSquare, MousePointerClick } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MarkdownRenderer } from '@/lib/markdown-renderer'
 import { Button } from '@/components/ui/button'
-import type { Conversation, ConversationActionProposal, ConversationMessage } from '@/lib/types'
+import type { Conversation, ConversationActionProposal, ConversationMessage, ToolCall } from '@/lib/types'
 import { ConversationComposer } from './conversation-composer'
+import { ExecutionTimeline } from './execution-timeline'
 
 interface ConversationThreadProps {
   conversation?: Conversation
@@ -26,6 +27,8 @@ interface ConversationThreadProps {
   onUploadFiles?: (files: File[]) => void
   /** 底部 composer 的生成报告回调（传入则显示报告按钮） */
   onGenerateReport?: () => void
+  executionToolCalls?: ToolCall[]
+  onConfirmExecutionOutput?: (toolCall: ToolCall) => Promise<void> | void
 }
 
 export function ConversationThread({
@@ -43,6 +46,8 @@ export function ConversationThread({
   sending,
   onUploadFiles,
   onGenerateReport,
+  executionToolCalls = [],
+  onConfirmExecutionOutput,
 }: ConversationThreadProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -117,6 +122,7 @@ export function ConversationThread({
   const messages = conversation.messages ?? []
   const isWaitingUser = runStatus === 'waiting_user' || runStatus === 'waiting_human'
   const canResume = isWaitingUser && Boolean(currentRunId && onResumeRun)
+  const showLiveExecutionTimeline = executionToolCalls.length > 0 || runStatus === 'running' || runStatus === 'queued'
 
   const handleApprove = () => {
     if (!currentRunId) return
@@ -131,6 +137,13 @@ export function ConversationThread({
     <div className="flex h-full min-h-0 flex-col">
       {/* Message list */}
       <div className="flex-1 space-y-4 overflow-y-auto px-1 py-2">
+        {showLiveExecutionTimeline && (
+          <ExecutionTimeline
+            runStatus={runStatus}
+            toolCalls={executionToolCalls}
+            onConfirmOutput={onConfirmExecutionOutput}
+          />
+        )}
         {messages.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border p-5 text-sm text-muted-foreground">
             会话已创建,在下方输入消息开始对话。
@@ -143,6 +156,7 @@ export function ConversationThread({
               conversationId={conversation.id}
               onConfirmActionProposal={onConfirmActionProposal}
               onRejectActionProposal={onRejectActionProposal}
+              onConfirmExecutionOutput={onConfirmExecutionOutput}
             />
           ))
         )}
@@ -203,13 +217,18 @@ function MessageBubble({
   conversationId,
   onConfirmActionProposal,
   onRejectActionProposal,
+  onConfirmExecutionOutput,
 }: {
   message: ConversationMessage
   conversationId: string
   onConfirmActionProposal?: (conversationId: string, proposalId: string) => Promise<void> | void
   onRejectActionProposal?: (conversationId: string, proposalId: string) => Promise<void> | void
+  onConfirmExecutionOutput?: (toolCall: ToolCall) => Promise<void> | void
 }) {
   const isUser = message.role === 'user'
+  if (message.processOnly && message.toolCalls?.length) {
+    return <ExecutionTimeline toolCalls={message.toolCalls} onConfirmOutput={onConfirmExecutionOutput} />
+  }
   return (
     <div className={cn('flex gap-3', isUser && 'flex-row-reverse')}>
       <Avatar role={message.role} />
@@ -231,6 +250,9 @@ function MessageBubble({
             {typeof warning.message === 'string' ? warning.message : '对话助手已使用降级模式。'}
           </div>
         ))}
+        {message.toolCalls && message.toolCalls.length > 0 && (
+          <ExecutionTimeline toolCalls={message.toolCalls} onConfirmOutput={onConfirmExecutionOutput} />
+        )}
         {message.actionProposals && message.actionProposals.length > 0 && (
           <div className="space-y-2">
             {message.actionProposals.map((proposal) => (

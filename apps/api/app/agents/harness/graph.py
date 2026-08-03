@@ -163,7 +163,11 @@ def build_skill_graph(
     def execute_tools(state: HarnessState) -> HarnessState:
         next_state = state
         for tool_name in state.get("plan", {}).get("tool_names", []):
-            next_state = run_tool_node(next_state, tool_name, tool_invoker=tool_invoker, fail_fast=fail_fast)
+            next_state = run_tool_node(
+                next_state, tool_name,
+                tool_invoker=tool_invoker, fail_fast=fail_fast,
+                llm_client=llm_client,
+            )
             if fail_fast and next_state.get("tool_failures"):
                 break
         return next_state
@@ -184,6 +188,7 @@ def build_skill_graph(
                 stage_name=state.get("stage_name", ""),
                 tool_results=state.get("tool_results", {}),
                 previous_stage_result=state.get("previous_stage_result"),
+                llm_client=llm_client,
             )
             # Convert dataclass to dict for serialization
             from dataclasses import asdict
@@ -323,7 +328,9 @@ def build_skill_graph(
                             _build_suggested_patch,
                         )
                         for issue in stage1_issues:
-                            patch = _build_suggested_patch(issue, scenario_summary)
+                            patch = _build_suggested_patch(
+                                issue, scenario_summary, llm_client=llm_client
+                            )
                             if patch is not None:
                                 issue["suggested_patch"] = patch
                     except Exception:
