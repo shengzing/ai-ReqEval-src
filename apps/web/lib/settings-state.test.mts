@@ -27,6 +27,7 @@ const baseSettings = {
     {
       stage_id: 'project-stage-1',
       primary_skill: 'scenario_risk_skill',
+      enabled_skills: ['scenario_risk_skill'],
       enabled_tools: ['document_parse', 'risk_identify'],
       enabled_subagents: ['risk_review_subagent'],
       auto_run_condition: 'manual',
@@ -129,6 +130,21 @@ test('collectStageImpact reports skill_versions change', () => {
   }
   const impacted = collectStageImpact(baseSettings, draft)
   assert.equal(impacted.length, 1)
+})
+
+test('collectStageImpact reports enabled_skills change when tools and primary match', () => {
+  const draft = {
+    ...baseSettings,
+    stage_skill_profiles: [
+      {
+        ...baseSettings.stage_skill_profiles[0],
+        enabled_skills: ['scenario_risk_skill', 'value_modeling_skill'],
+      },
+    ],
+  }
+  const impacted = collectStageImpact(baseSettings, draft)
+  assert.equal(impacted.length, 1)
+  assert.equal(impacted[0].stage_id, 'project-stage-1')
 })
 
 test('collectStageImpact reports no change when all fields match', () => {

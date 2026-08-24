@@ -15,6 +15,8 @@ import type {
   ApiFileArtifact,
   ApiFilePreview,
   ApiModelOption,
+  ApiModelTestRequest,
+  ApiModelTestResponse,
   ApiProject,
   ApiProjectSettings,
   ApiProjectSettingsBundle,
@@ -27,6 +29,7 @@ import type {
   ApiSkill,
   ApiSkillOption,
   ApiStage,
+  ApiStageCompletionSnapshot,
   ApiStageLockCheck,
   ApiStageResult,
   ApiStageSkillProfile,
@@ -40,35 +43,73 @@ import type {
 } from '@/lib/api-types'
 import { ApiError, parseErrorDetail } from '@/lib/api-error'
 import {
+  getLatestConversationRunId,
   mapAutoResearchRecordToSuggestion,
   mapConversationToolCalls,
+  mapEvidenceRelevanceStatus,
   mapRunEventsToConversation,
   mapRunEventsToSuggestions,
+  mapRunEventsToExecutionTrace,
+  mapVersionLog,
+  mergeVisionEvidenceDetails,
+  selectLatestValidStageResult,
   mapRunEventsToToolCalls,
   mapRunStatus,
   mapStageStatus,
   type RunEventFrame,
 } from '@/lib/api-mappers'
+import {
+  isAbortError,
+  startClientRequest,
+  type ClientRequestKind,
+} from '@/lib/request-lifecycle'
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:8899/api/v1'
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-    cache: 'no-store',
+export interface ApiRequestOptions {
+  signal?: AbortSignal
+  requestKind?: ClientRequestKind
+  requestKey?: string
+}
+
+interface RequestTelemetry extends ApiRequestOptions {
+  operation: string
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit, telemetry?: RequestTelemetry): Promise<T> {
+  const method = init?.method ?? 'GET'
+  const finishMetric = startClientRequest({
+    kind: telemetry?.requestKind ?? 'interactive',
+    operation: telemetry?.operation ?? `${method} ${path}`,
+    requestKey: telemetry?.requestKey,
+    method,
+    path,
   })
-  if (!response.ok) {
-    throw new ApiError({
-      status: response.status,
-      detail: await parseErrorDetail(response),
-      path,
+  let response: Response | undefined
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      signal: telemetry?.signal ?? init?.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers ?? {}),
+      },
+      cache: 'no-store',
     })
+    if (!response.ok) {
+      throw new ApiError({
+        status: response.status,
+        detail: await parseErrorDetail(response),
+        path,
+      })
+    }
+    const result = response.status === 204 ? undefined as T : await response.json() as T
+    finishMetric('success', response.status)
+    return result
+  } catch (error) {
+    finishMetric(isAbortError(error) ? 'aborted' : 'failed', response?.status)
+    throw error
   }
-  return response.json() as Promise<T>
 }
 
 function timeAgo(isoText: string): string {
@@ -82,8 +123,12 @@ function timeAgo(isoText: string): string {
   return `${days} 天前`
 }
 
-export async function loadProjectTree(): Promise<Project[]> {
-  const workspaceResponse = await fetchJson<{ items: ApiWorkspaceProject[] }>('/workspace/tree')
+export async function loadProjectTree(options: ApiRequestOptions = {}): Promise<Project[]> {
+  const workspaceResponse = await fetchJson<{ items: ApiWorkspaceProject[] }>(
+    '/workspace/tree',
+    undefined,
+    { ...options, operation: 'load_project_tree' },
+  )
   return workspaceResponse.items.map(mapWorkspaceProject)
 }
 
@@ -111,7 +156,7 @@ function mapWorkspaceStage(stage: ApiWorkspaceStage): Stage {
   }
 }
 
-function mapConversation(item: ApiConversation): Conversation {
+export function mapConversation(item: ApiConversation): Conversation {
   // Preserve the backend status so the UI can show running / waiting_user
   // conversations with the correct colored dot in the sidebar.
   const mappedStatus = item.status === 'archived'
@@ -127,6 +172,8 @@ function mapConversation(item: ApiConversation): Conversation {
       role: message.role,
       content: message.content,
       created_at: message.created_at,
+      runId: message.run_id ?? undefined,
+      citations: message.citations,
       harnessWarnings: message.harness_warnings,
       toolCalls: mapConversationToolCalls(message.tool_calls),
       processOnly: message.process_only,
@@ -136,13 +183,21 @@ function mapConversation(item: ApiConversation): Conversation {
         title: proposal.title,
         requiresConfirmation: proposal.requires_confirmation,
         status: proposal.status as 'pending' | 'accepting' | 'accepted' | 'rejected',
+        confirmationId: proposal.confirmation_id ?? undefined,
       })),
     })) ?? [],
   }
 }
 
-export async function loadStage(stageId: string): Promise<Pick<Stage, 'id' | 'name' | 'status' | 'objective'>> {
-  const stage = await fetchJson<ApiStage>(`/stages/${stageId}`)
+export async function loadStage(
+  stageId: string,
+  options: ApiRequestOptions = {},
+): Promise<Pick<Stage, 'id' | 'name' | 'status' | 'objective'>> {
+  const stage = await fetchJson<ApiStage>(
+    `/stages/${stageId}`,
+    undefined,
+    { ...options, operation: 'load_stage' },
+  )
   return {
     id: stage.id,
     name: stage.name,
@@ -151,18 +206,31 @@ export async function loadStage(stageId: string): Promise<Pick<Stage, 'id' | 'na
   }
 }
 
-export async function loadLatestStageResult(stageId: string): Promise<Record<string, unknown> | undefined> {
-  const response = await fetchJson<{ items: ApiStageResult[] }>(`/stages/${stageId}/results`)
-  const latest = response.items.at(-1)
+export async function loadLatestStageResult(
+  stageId: string,
+  options: ApiRequestOptions = {},
+): Promise<Record<string, unknown> | undefined> {
+  const response = await fetchJson<{ items: ApiStageResult[] }>(
+    `/stages/${stageId}/results`,
+    undefined,
+    { ...options, operation: 'load_stage_results' },
+  )
+  // The API retains invalid/waiting drafts for audit. They must never hydrate
+  // the current stage output or make an old AML conclusion look authoritative.
+  const latest = selectLatestValidStageResult(response.items, stageId.endsWith('stage-1'))
   return latest?.result_payload
 }
 
-export async function loadLatestStageVersion(projectId: string, stageId: string): Promise<{
-  versionId?: string
-  lockedAt?: string
-  diffFields?: string[]
-} | undefined> {
-  const response = await fetchJson<{ items: ApiVersionLog[] }>(`/version-logs?project_id=${projectId}`)
+export async function loadLatestStageVersion(
+  projectId: string,
+  stageId: string,
+  options: ApiRequestOptions = {},
+): Promise<{ versionId?: string; lockedAt?: string; diffFields?: string[] } | undefined> {
+  const response = await fetchJson<{ items: ApiVersionLog[] }>(
+    `/version-logs?project_id=${projectId}`,
+    undefined,
+    { ...options, operation: 'load_stage_version' },
+  )
   const matched = response.items
     .filter((item) => item.details?.stage_id === stageId || item.resource_id === stageId)
     .at(-1)
@@ -177,8 +245,15 @@ export async function loadLatestStageVersion(projectId: string, stageId: string)
   }
 }
 
-export async function loadStageLockCheck(stageId: string): Promise<Stage['lockCheck']> {
-  const response = await fetchJson<ApiStageLockCheck>(`/stages/${stageId}/lock-check`)
+export async function loadStageLockCheck(
+  stageId: string,
+  options: ApiRequestOptions = {},
+): Promise<Stage['lockCheck']> {
+  const response = await fetchJson<ApiStageLockCheck>(
+    `/stages/${stageId}/lock-check`,
+    undefined,
+    { ...options, operation: 'load_stage_lock_check' },
+  )
   return {
     stageId: response.stage_id,
     ready: response.ready,
@@ -186,12 +261,22 @@ export async function loadStageLockCheck(stageId: string): Promise<Stage['lockCh
       key: item.key,
       label: item.label,
       passed: item.passed,
+      machineCode: item.machine_code,
+      hint: item.hint,
+      objectId: item.object_id ?? null,
     })),
   }
 }
 
-export async function loadStageSkills(stageId: string): Promise<StageSkill[]> {
-  const response = await fetchJson<{ items: ApiSkill[] }>(`/skills?stage_id=${stageId}`)
+export async function loadStageSkills(
+  stageId: string,
+  options: ApiRequestOptions = {},
+): Promise<StageSkill[]> {
+  const response = await fetchJson<{ items: ApiSkill[] }>(
+    `/skills?stage_id=${stageId}`,
+    undefined,
+    { ...options, operation: 'load_stage_skills' },
+  )
   return response.items.map((item) => ({
     id: item.name,
     name: item.name,
@@ -200,15 +285,15 @@ export async function loadStageSkills(stageId: string): Promise<StageSkill[]> {
   }))
 }
 
-export async function loadProjectEvidence(projectId: string, currentStageName?: string): Promise<EvidenceItem[]> {
-  const [evidenceResponse, filesResponse, visionResultsResponse] = await Promise.all([
-    fetchJson<{ items: ApiEvidenceItem[] }>(`/evidence?project_id=${projectId}`),
-    fetchJson<{ items: ApiFileArtifact[] }>(`/files?project_id=${projectId}`),
-    fetchJson<{ items: ApiVisionResultSummary[] }>(`/vision-results?project_id=${projectId}`),
-  ])
-  const visionResultsByFileId = new Map(visionResultsResponse.items.map((item) => [item.file_id, item]))
-
-  const evidenceItems = evidenceResponse.items.map((item) => ({
+function mapSnapshotEvidence(
+  evidence: ApiEvidenceItem[],
+  files: ApiFileArtifact[],
+  currentStageName?: string,
+): EvidenceItem[] {
+  const evidenceSourceFileIds = new Set(
+    evidence.flatMap((item) => item.source_file_id ? [item.source_file_id] : []),
+  )
+  const evidenceItems = evidence.map((item) => ({
     id: item.id,
     name: item.name,
     type: (item.source_type === 'vision' ? 'record' : 'file') as EvidenceItem['type'],
@@ -219,49 +304,127 @@ export async function loadProjectEvidence(projectId: string, currentStageName?: 
     isReferenced: item.status === 'referenced',
     attachmentPath: item.attachment_path ?? undefined,
     reviewNote: item.review_note ?? undefined,
-    summaryLines:
-      item.source_type === 'vision'
-        ? (() => {
-            const vision = item.source_file_id ? visionResultsByFileId.get(item.source_file_id) : undefined
-            if (!vision) return undefined
-            const lines = [
-              `待确认字段 ${vision.to_confirm.length} 个`,
-              `不确定项 ${vision.uncertainties.length} 个`,
-            ]
-            if (item.review_note) lines.push(`处理说明：${item.review_note}`)
-            return lines
-          })()
-        : item.review_note ? [`处理说明：${item.review_note}`] : undefined,
-    detailLines:
-      item.source_type === 'vision'
-        ? (() => {
-            const vision = item.source_file_id ? visionResultsByFileId.get(item.source_file_id) : undefined
-            if (!vision) return undefined
-            const confirmLines = vision.to_confirm.map((entry) => {
-              const field = typeof entry.field === 'string' ? entry.field : 'unknown'
-              const reason = typeof entry.reason === 'string' ? entry.reason : 'needs_review'
-              return `待确认：${field} (${reason})`
-            })
-            const uncertaintyLines = vision.uncertainties.map((entry) => `不确定：${entry}`)
-            return [...confirmLines, ...uncertaintyLines]
-          })()
-        : undefined,
+    summaryLines: item.review_note ? [`处理说明：${item.review_note}`] : undefined,
+    relevanceStatus: mapEvidenceRelevanceStatus(item.relevance_status),
+    relevanceScore: item.relevance_score ?? 0,
+    relevanceReasons: item.relevance_reasons ?? [],
+    relevanceRuleVersion: item.relevance_rule_version || undefined,
+    relevanceSource: item.relevance_source ?? 'machine',
+    relevanceReviewReason: item.relevance_review_reason ?? undefined,
+    relevanceReviewedBy: item.relevance_reviewed_by ?? undefined,
+    relevanceReviewedAt: item.relevance_reviewed_at ?? undefined,
+    relevancePreviousStatus: item.relevance_previous_status ?? undefined,
   }))
-
-  const uploadedFiles = filesResponse.items
-    .filter((item) => item.status === 'uploaded')
+  const uploadedFiles = files
+    .filter((item) => !evidenceSourceFileIds.has(item.id))
     .map((item) => ({
       id: item.id,
       name: item.filename,
       type: 'file' as const,
       sourceFileId: item.id,
       stage: currentStageName,
-      status: 'uploaded' as const,
+      status: (item.status === 'rejected' ? 'archived' : 'uploaded') as EvidenceItem['status'],
       updatedAt: timeAgo(item.created_at),
       isReferenced: false,
+      relevanceStatus: mapEvidenceRelevanceStatus(item.relevance_status),
+      relevanceScore: item.relevance_score ?? 0,
+      relevanceReasons: item.relevance_reasons ?? [],
+      relevanceRuleVersion: item.relevance_rule_version || undefined,
+      relevanceSource: item.relevance_source ?? 'machine',
+      relevanceReviewReason: item.relevance_review_reason ?? undefined,
+      relevanceReviewedBy: item.relevance_reviewed_by ?? undefined,
+      relevanceReviewedAt: item.relevance_reviewed_at ?? undefined,
+      relevancePreviousStatus: item.relevance_previous_status ?? undefined,
+      securityRejected: Boolean(item.security_rejected || item.status === 'rejected'),
     }))
-
   return [...uploadedFiles, ...evidenceItems]
+}
+
+export interface CompletionSnapshot {
+  projects: Project[]
+  stage: Stage
+  resultPayload?: Record<string, unknown>
+  evidenceItems: EvidenceItem[]
+  suggestions: SuggestionCard[]
+  conversation?: Conversation
+  /** HCR-P1-05：富集字段，让前端完成 Run 后只读一次快照。 */
+  versionLog?: Stage['versionLog']
+  visionResults?: ApiVisionResultSummary[]
+}
+
+export async function loadStageCompletionSnapshot(
+  stageId: string,
+  runId: string,
+  options: ApiRequestOptions = {},
+): Promise<CompletionSnapshot> {
+  const snapshot = await fetchJson<ApiStageCompletionSnapshot>(
+    `/stages/${stageId}/completion-snapshot?run_id=${encodeURIComponent(runId)}`,
+    undefined,
+    { ...options, operation: 'load_stage_completion_snapshot' },
+  )
+  // HCR-P1-05：在快照返回时一次性合并 vision 详情 + 映射 version_log，
+  // 让 followRun 完成分支不再发 /vision-results + /version-logs。
+  const evidenceItems = mergeVisionEvidenceDetails(
+    mapSnapshotEvidence(snapshot.evidence, snapshot.files, snapshot.stage.name),
+    snapshot.vision_results ?? [],
+  )
+  return {
+    projects: snapshot.workspace.items.map(mapWorkspaceProject),
+    stage: {
+      id: snapshot.stage.id,
+      name: snapshot.stage.name,
+      status: mapStageStatus(snapshot.stage.status),
+      objective: snapshot.stage.objective ?? undefined,
+      lockCheck: {
+        stageId: snapshot.lock_check.stage_id,
+        ready: snapshot.lock_check.ready,
+        checks: snapshot.lock_check.checks.map((item) => ({ key: item.key, label: item.label, passed: item.passed, machineCode: item.machine_code, hint: item.hint, objectId: item.object_id ?? null })),
+      },
+      resultPayload: snapshot.latest_result?.result_payload,
+      conversations: [],
+    },
+    resultPayload: snapshot.latest_result?.result_payload,
+    evidenceItems,
+    suggestions: snapshot.suggestions
+      .filter((item) => item.status === 'pending')
+      .map(mapAutoResearchRecordToSuggestion),
+    conversation: snapshot.conversation ? mapConversation(snapshot.conversation) : undefined,
+    versionLog: mapVersionLog(snapshot.version_log ?? null),
+    visionResults: snapshot.vision_results ?? [],
+  }
+}
+
+export async function loadProjectEvidence(
+  projectId: string,
+  currentStageName?: string,
+  options: ApiRequestOptions = {},
+): Promise<EvidenceItem[]> {
+  const [evidenceResponse, filesResponse] = await Promise.all([
+    fetchJson<{ items: ApiEvidenceItem[] }>(
+      `/evidence?project_id=${projectId}`,
+      undefined,
+      { ...options, operation: 'load_project_evidence' },
+    ),
+    fetchJson<{ items: ApiFileArtifact[] }>(
+      `/files?project_id=${projectId}`,
+      undefined,
+      { ...options, operation: 'load_project_files' },
+    ),
+  ])
+  return mapSnapshotEvidence(evidenceResponse.items, filesResponse.items, currentStageName)
+}
+
+export async function loadProjectVisionDetails(
+  projectId: string,
+  evidenceItems: EvidenceItem[],
+  options: ApiRequestOptions = {},
+): Promise<EvidenceItem[]> {
+  const response = await fetchJson<{ items: ApiVisionResultSummary[] }>(
+    `/vision-results?project_id=${projectId}`,
+    undefined,
+    { ...options, operation: 'load_project_vision_details' },
+  )
+  return mergeVisionEvidenceDetails(evidenceItems, response.items)
 }
 
 export async function createRun(input: {
@@ -303,18 +466,9 @@ export async function updateProject(
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  const path = `/projects/${projectId}`
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  await fetchJson<void>(`/projects/${projectId}`, {
     method: 'DELETE',
-    cache: 'no-store',
   })
-  if (!response.ok) {
-    throw new ApiError({
-      status: response.status,
-      detail: await parseErrorDetail(response),
-      path,
-    })
-  }
 }
 
 export async function uploadProjectFile(input: {
@@ -355,6 +509,22 @@ export async function parseProjectFile(fileId: string) {
     created_at: string
   }>(`/files/${fileId}/parse`, {
     method: 'POST',
+  })
+}
+
+export async function reviewProjectFileRelevance(input: {
+  fileId: string
+  decision: 'related' | 'unrelated' | 'rejected'
+  reason: string
+  reviewer?: string
+}): Promise<ApiFileArtifact> {
+  return fetchJson<ApiFileArtifact>(`/files/${input.fileId}/relevance-review`, {
+    method: 'POST',
+    body: JSON.stringify({
+      decision: input.decision,
+      reason: input.reason,
+      reviewer: input.reviewer ?? 'workspace_user',
+    }),
   })
 }
 
@@ -422,18 +592,9 @@ export async function restoreConversation(conversationId: string): Promise<void>
 }
 
 export async function deleteConversation(conversationId: string): Promise<void> {
-  const path = `/conversations/${conversationId}`
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  await fetchJson<void>(`/conversations/${conversationId}`, {
     method: 'DELETE',
-    cache: 'no-store',
   })
-  if (!response.ok) {
-    throw new ApiError({
-      status: response.status,
-      detail: await parseErrorDetail(response),
-      path,
-    })
-  }
 }
 
 export async function lockStage(stageId: string): Promise<void> {
@@ -480,18 +641,33 @@ export async function streamRunEvents(
   let terminalSeen = false
 
   while (reconnectCount <= maxReconnects && !terminalSeen) {
-    const response = await fetch(`${API_BASE_URL}/runs/${runId}/events`, {
-      cache: 'no-store',
-      signal: options.signal,
-      headers: {
-        Accept: 'text/event-stream',
-      },
+    const path = `/runs/${runId}/events`
+    const finishMetric = startClientRequest({
+      kind: 'agent_execution',
+      operation: 'stream_run_events',
+      requestKey: runId,
+      method: 'GET',
+      path,
     })
+    let response: Response
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        cache: 'no-store',
+        signal: options.signal,
+        headers: {
+          Accept: 'text/event-stream',
+        },
+      })
+    } catch (error) {
+      finishMetric(isAbortError(error) ? 'aborted' : 'failed')
+      throw error
+    }
     if (!response.ok || !response.body) {
+      finishMetric('failed', response.status)
       throw new ApiError({
         status: response.status,
         detail: await parseErrorDetail(response),
-        path: `/runs/${runId}/events`,
+        path,
       })
     }
 
@@ -499,29 +675,35 @@ export async function streamRunEvents(
     const decoder = new TextDecoder()
     let buffer = ''
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const blocks = buffer.split('\n\n')
-      buffer = blocks.pop() ?? ''
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() ?? ''
 
-      for (const block of blocks) {
-        const frame = parseSseBlock(block)
-        if (!frame) continue
-        frames.push(frame)
-        options.onEvent?.(frame)
-        if (['run.completed', 'run.failed', 'run.cancelled'].includes(frame.event)) {
-          terminalSeen = true
+        for (const block of blocks) {
+          const frame = parseSseBlock(block)
+          if (!frame) continue
+          frames.push(frame)
+          options.onEvent?.(frame)
+          if (['run.completed', 'run.failed', 'run.cancelled', 'run.waiting_user', 'run.waiting_inputs'].includes(frame.event)) {
+            terminalSeen = true
+          }
         }
       }
+      finishMetric('success', response.status)
+    } catch (error) {
+      finishMetric(isAbortError(error) ? 'aborted' : 'failed', response.status)
+      throw error
     }
 
     const trailingFrame = parseSseBlock(buffer)
     if (trailingFrame) {
       frames.push(trailingFrame)
       options.onEvent?.(trailingFrame)
-      if (['run.completed', 'run.failed', 'run.cancelled'].includes(trailingFrame.event)) {
+      if (['run.completed', 'run.failed', 'run.cancelled', 'run.waiting_user', 'run.waiting_inputs'].includes(trailingFrame.event)) {
         terminalSeen = true
       }
     }
@@ -539,8 +721,15 @@ export async function streamRunEvents(
   return frames
 }
 
-export async function loadAutoResearchRecords(stageId: string): Promise<SuggestionCard[]> {
-  const response = await fetchJson<{ items: ApiAutoResearchRecord[] }>(`/autoresearch?stage_id=${stageId}`)
+export async function loadAutoResearchRecords(
+  stageId: string,
+  options: ApiRequestOptions = {},
+): Promise<SuggestionCard[]> {
+  const response = await fetchJson<{ items: ApiAutoResearchRecord[] }>(
+    `/autoresearch?stage_id=${stageId}`,
+    undefined,
+    { ...options, operation: 'load_autoresearch_records' },
+  )
   return response.items.map(mapAutoResearchRecordToSuggestion)
 }
 
@@ -603,7 +792,7 @@ export async function confirmAutoResearchRecord(input: {
   }
 }
 
-export { mapAutoResearchRecordToSuggestion, mapConversationToolCalls, mapRunEventsToConversation, mapRunEventsToSuggestions, mapRunEventsToToolCalls, mapRunStatus, mapStageStatus }
+export { getLatestConversationRunId, mapAutoResearchRecordToSuggestion, mapConversationToolCalls, mapRunEventsToConversation, mapRunEventsToSuggestions, mapRunEventsToExecutionTrace, mapRunEventsToToolCalls, mapRunStatus, mapStageStatus }
 export type { RunEventFrame }
 
 export async function loadProjectSettingsBundle(projectId: string): Promise<ApiProjectSettingsBundle> {
@@ -658,6 +847,16 @@ export async function resetProjectSettings(projectId: string): Promise<ApiProjec
   })
 }
 
+export async function testProjectModelConnection(
+  projectId: string,
+  payload: ApiModelTestRequest
+): Promise<ApiModelTestResponse> {
+  return fetchJson<ApiModelTestResponse>(`/projects/${projectId}/settings/models/test`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 /** Append a message to a conversation.
  *
  * 当 `runHarness` 为 true 时，后端会触发对话 Harness 生成 assistant 回复，
@@ -706,7 +905,7 @@ export async function rejectConversationActionProposal(
 export async function resumeRun(
   runId: string,
   humanInput?: Record<string, unknown>
-): Promise<{ id: string; status: string }> {
+): Promise<ApiRun> {
   return fetchJson(`/runs/${runId}/resume`, {
     method: 'POST',
     body: JSON.stringify({ human_input: humanInput ?? {} }),

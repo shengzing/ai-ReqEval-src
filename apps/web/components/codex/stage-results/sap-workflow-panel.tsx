@@ -326,7 +326,7 @@ function SAPMetric({ label, value, tone = 'default' }: { label: string; value: s
 
 function FlowConnector({ label, dashed }: { label: string; dashed?: boolean }) {
   return (
-    <div className="flex h-16 w-40 shrink-0 flex-col items-center justify-center">
+    <div className="flex h-10 w-40 shrink-0 flex-col items-center justify-center">
       <span className="mb-1 max-w-40 truncate rounded-sm bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground ring-1 ring-border/70">
         {label}
       </span>
@@ -361,7 +361,7 @@ function SAPFlowNode({
           : step.node.hitlRules.length || step.node.humanReviewRequired
             ? 'border-rose-400/70 bg-rose-50/90 text-rose-950 dark:bg-rose-950/20 dark:text-rose-100'
             : 'border-cyan-500/60 bg-cyan-50/80 text-cyan-950 dark:bg-cyan-950/20 dark:text-cyan-100'
-  const shape = isDecision ? 'h-28 w-28 rotate-45' : isTerminal ? 'h-24 w-32 rounded-full' : 'h-24 w-40 rounded-md'
+  const shape = isDecision ? 'h-24 w-24 rotate-45' : isTerminal ? 'h-20 w-28 rounded-full' : 'h-20 w-36 rounded-md'
   const contentShape = isDecision ? '-rotate-45' : ''
   const icon =
     step.kind === 'start' ? <Play className="size-3.5" />
@@ -605,8 +605,8 @@ export function SAPWorkflowPanel({
           SAP 工作流暂无可展示内容。需要先生成 SOP 摘要、参与角色、流程节点、责任分配或 HITL 规则。
         </div>
       ) : (
-        <>
-          <div className="mt-3 overflow-x-auto rounded-md border border-border/80 bg-[linear-gradient(to_right,rgba(148,163,184,0.14)_1px,transparent_1px),linear-gradient(to_bottom,rgba(148,163,184,0.14)_1px,transparent_1px)] bg-[size:28px_28px] p-4">
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <div className="max-h-[70vh] overflow-auto rounded-md border border-border/80 bg-[linear-gradient(to_right,rgba(148,163,184,0.14)_1px,transparent_1px),linear-gradient(to_bottom,rgba(148,163,184,0.14)_1px,transparent_1px)] bg-[size:28px_28px] p-4">
             <div className="min-w-max rounded-md border border-dashed border-cyan-600/50 bg-background/80 p-4 shadow-sm">
               <div className="flex items-center justify-between gap-4 border-b border-border/70 pb-3">
                 <div>
@@ -666,19 +666,22 @@ export function SAPWorkflowPanel({
             </div>
           </div>
 
-          <FlowDetailPanel
-            step={selectedStep}
-            participants={normalizedParticipants}
-            unboundHitlRules={unboundHitlRules}
-            riskLevel={riskLevel}
-            hitlLevel={hitlLevel}
-            passLabel={passLabel}
-            rejectLabel={rejectLabel}
-            loopTarget={loopTarget}
-            returnEdges={returnEdges}
-            nodesById={nodesById}
-          />
-        </>
+          {/* 节点详情：右栏，随左侧流程节点选中切换 */}
+          <div className="min-w-0">
+            <FlowDetailPanel
+              step={selectedStep}
+              participants={normalizedParticipants}
+              unboundHitlRules={unboundHitlRules}
+              riskLevel={riskLevel}
+              hitlLevel={hitlLevel}
+              passLabel={passLabel}
+              rejectLabel={rejectLabel}
+              loopTarget={loopTarget}
+              returnEdges={returnEdges}
+              nodesById={nodesById}
+            />
+          </div>
+        </div>
       )}
     </section>
   )

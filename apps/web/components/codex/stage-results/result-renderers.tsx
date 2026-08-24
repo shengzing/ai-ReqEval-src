@@ -167,6 +167,145 @@ export function RawPayloadPanel({ payload }: { payload: ResultPayload }) {
 }
 
 /**
+ * 错误放大路径面板（F3 产物）：把 risk-bound 节点向下游推导的放大链
+ * 渲染为「起点 → 下游链 → 放大机制」卡片列表，缺失时显示缺失提示。
+ */
+export function ErrorAmplificationPathsPanel({ items }: { items: unknown[] }) {
+  const paths = items
+    .map((item) => asRecord(item))
+    .filter((rec): rec is Record<string, unknown> => Boolean(rec)) as Record<string, unknown>[]
+
+  if (!paths.length) {
+    return (
+      <div className="rounded-md border border-dashed border-muted-foreground/40 bg-muted/30 p-3 text-xs text-muted-foreground">
+        <PanelTitle title="错误放大路径" helpText="M1 硬性收口：L2/L3 风险至少 3 条可定位的错误放大路径。当前未生成，请在证据中补充风险绑定节点或人工复核点。" />
+        <p className="mt-2">当前未生成错误放大路径（L2/L3 风险至少需 3 条）。</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle title="错误放大路径" helpText="从风险绑定节点向下游推导的放大链：起点风险 → 下游节点链 → 放大机制，用于判断一旦出错会放大到什么程度。" />
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {paths.map((path, index) => {
+          const downstream = Array.isArray(path.downstream_node_ids) ? path.downstream_node_ids : []
+          const mechanisms = Array.isArray(path.amplification_mechanisms) ? path.amplification_mechanisms : []
+          const reached = path.terminal_reached === true
+          return (
+            <div key={`eap-${index}`} className="rounded-md border border-border bg-muted/40 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-foreground">
+                  {String(path.path_id ?? `路径 ${index + 1}`)}
+                  <span className="ml-2 text-[11px] text-muted-foreground">{String(path.start_node_name ?? '')}</span>
+                </p>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] ${reached ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'}`}>
+                  {reached ? '已到达终点' : '未到达终点'}
+                </span>
+              </div>
+              {typeof path.trigger_risk === 'string' && path.trigger_risk && (
+                <p className="mt-1 text-[11px] text-muted-foreground">触发风险：{path.trigger_risk}</p>
+              )}
+              {downstream.length > 0 && (
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  <span className="text-[11px] text-muted-foreground">下游链：</span>
+                  {downstream.map((id, i) => (
+                    <span key={`${id}-${i}`} className="rounded bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-border/70">
+                      {String(id)}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {mechanisms.length > 0 && (
+                <ul className="mt-1 space-y-0.5">
+                  {mechanisms.map((m, i) => (
+                    <li key={`m-${i}`} className="text-[11px] text-amber-700">• {String(m)}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 跨系统链路面板（F2 产物）：每个流程节点绑定的系统与链路类型。
+ */
+export function CrossSystemLinksPanel({ items }: { items: unknown[] }) {
+  const links = items
+    .map((item) => asRecord(item))
+    .filter((rec): rec is Record<string, unknown> => Boolean(rec)) as Record<string, unknown>[]
+
+  if (!links.length) {
+    return (
+      <div className="rounded-md border border-dashed border-muted-foreground/40 bg-muted/30 p-3 text-xs text-muted-foreground">
+        <PanelTitle title="跨系统链路" helpText="流程节点绑定的跨系统链路（预警平台/贷后系统/核心系统等），用于判断系统交互复杂度。当前未生成。" />
+        <p className="mt-2">当前未生成跨系统链路绑定。</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle title="跨系统链路" helpText="每个流程节点绑定的系统与链路类型，体现系统交互复杂度。" />
+      <div className="mt-2 space-y-2">
+        {links.map((link, index) => {
+          const systems = Array.isArray(link.systems) ? link.systems : []
+          return (
+            <div key={`csl-${index}`} className="rounded-md border border-border bg-muted/40 p-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-mono text-[10px] text-muted-foreground">{String(link.node_id ?? '')}</span>
+                <span className="text-sm font-medium text-foreground">{String(link.node_name ?? '')}</span>
+                <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] text-secondary-foreground">
+                  {String(link.link_type ?? 'reference')}
+                </span>
+                {systems.map((sys, i) => (
+                  <span key={`${sys}-${i}`} className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                    {String(sys)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 本项目边界认可状态小徽标（F1）：单项目级，描述本项目场景边界是否已获
+ * 业务侧认可。主案例定义 / 补充验证场景 / 材料清单是课题级产物（每个
+ * Project 是一个独立案例，主案例与补充场景的区分是课题级研究对象决策），
+ * 不在单项目 scenario_summary 内。
+ */
+export function BoundaryReviewStatusBadge({ reviewStatus }: { reviewStatus?: string }) {
+  const reviewLabel = reviewStatus === 'business_confirmed'
+    ? '业务侧已认可'
+    : reviewStatus === 'business_rejected'
+      ? '业务侧已退回'
+      : '业务侧待认可'
+  const tone = reviewStatus === 'business_confirmed'
+    ? 'bg-emerald-500/10 text-emerald-700'
+    : reviewStatus === 'business_rejected'
+      ? 'bg-destructive/10 text-destructive'
+      : 'bg-amber-500/10 text-amber-700'
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle title="边界业务侧认可状态" helpText="本项目场景边界是否已获业务侧初步认可。M1 关卡要求主案例边界获业务侧认可；认可证据需线下取得，平台只标记状态。" />
+      <div className="mt-2">
+        <span className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium ${tone}`}>
+          {reviewLabel}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+/**
  * 风险分级矩阵（B 类分级治理映射）：风险等级 → HITL 强度 / 准入规则 / 最小审计留痕要求
  *
  * 渲染为真正的二维表格，让"分级→治理配置"的映射关系一目了然。矩阵始终完整显示

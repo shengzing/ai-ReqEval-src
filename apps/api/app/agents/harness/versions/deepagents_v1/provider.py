@@ -20,11 +20,15 @@ import logging
 from typing import Any, Callable
 
 from src.apps.api.app.agents.harness.contracts import (
+    build_skipped_subagent_audits,
     HarnessRequest,
     HarnessResult,
     harness_result_from_legacy_state,
 )
 from src.apps.api.app.agents.harness.llm import HarnessLLMClient
+from src.apps.api.app.agents.harness.adapters.permission_adapter import PermissionAdapter
+from src.apps.api.app.agents.harness.adapters.tool_adapter import ToolAdapter
+from src.apps.api.app.agents.harness.contracts import HarnessToolCall
 from src.apps.api.app.services.tool_service import invoke_tool
 
 
@@ -83,11 +87,12 @@ class DeepAgentsV1HarnessProvider:
 
     def run(self, request: HarnessRequest) -> HarnessResult:
         llm = _build_llm_client(request)
+        tool_adapter = _resolve_tool_adapter(request)
         if not llm or not llm.is_configured():
-            return self._fallback_result(request, "llm_not_configured")
+            return self._fallback_result(request, "llm_not_configured", tool_adapter=tool_adapter)
 
         collector = _ToolResultCollector(request)
-        tools = _build_project_tools(request, collector)
+        tools = _build_project_tools(request, collector, tool_adapter=tool_adapter, llm_client=llm)
 
         try:
             agent = self._build_agent(request, llm, tools)
@@ -204,6 +209,7 @@ class DeepAgentsV1HarnessProvider:
         request: HarnessRequest,
         code: str,
         exc: Exception | None = None,
+        tool_adapter: ToolAdapter | None = None,
     ) -> HarnessResult:
         """LLM unavailable: produce an auditable result from rule-based tools.
 
@@ -213,17 +219,22 @@ class DeepAgentsV1HarnessProvider:
         warning rather than silently degrading.
         """
         collector = _ToolResultCollector(request)
+        adapter = tool_adapter or _resolve_tool_adapter(request)
         for tool_name in _safe_enabled_tools(request):
             try:
-                result = invoke_tool(
-                    tool_name=tool_name,
-                    goal=request.goal,
-                    stage_name=request.stage_name,
-                    evidence_items=list(request.evidence_items),
-                    vision_results=list(request.vision_results),
-                    previous_stage_result=request.previous_stage_result,
+                result = adapter.invoke(
+                    request,
+                    HarnessToolCall(tool_name=tool_name, reason="deepagents.fallback"),
+                    llm_client=request.options.get("llm_client"),
+                    permission_adapter=request.options.get("permission_adapter"),
+                    provider="deepagents-v1",
                 )
-                collector.record(tool_name, result)
+                if result.success:
+                    collector.record_adapted(tool_name, result)
+                elif result.status == "skipped_missing_input":
+                    collector.record_skip(tool_name, result)
+                else:
+                    collector.record_failure_detail(tool_name, result.to_failure_item())
             except Exception as exc:  # noqa: BLE001 — record failure, continue
                 collector.record_failure(tool_name, exc)
 
@@ -259,11 +270,20 @@ class DeepAgentsV1HarnessProvider:
         tool_results = dict(collector.tool_results)
         tool_result_items = list(collector.tool_result_items)
         tool_failures = list(collector.tool_failures)
+        tool_skips = list(collector.tool_skips)
 
-        synthesized_payload, validation_issues, quality_scores = _synthesize(
-            request, tool_results
-        )
-        autoresearch_record_ids = _maybe_autoresearch(request)
+        no_completed_tools = bool(tool_skips) and not bool(tool_results)
+        if no_completed_tools:
+            synthesized_payload, validation_issues, quality_scores = (
+                {"source": "skipped_missing_input", "tool_count": 0, "formal_result": False},
+                [{"code": "missing_input", "detail": "No tool completed because required input is unavailable."}],
+                {},
+            )
+        else:
+            synthesized_payload, validation_issues, quality_scores = _synthesize(request, tool_results)
+        # AutoResearch 已从 harness 解耦：不再内联生成记录。AutoResearch 作为独立
+        # 能力提升轨道，经其专属 API（/autoresearch/*）显式触发。state 字段保留为空。
+        autoresearch_record_ids: list[str] = []
 
         plan = {
             "tool_names": list(tool_results.keys()),
@@ -272,14 +292,16 @@ class DeepAgentsV1HarnessProvider:
         }
         requires_human = bool(tool_failures)
         decision = {
-            "should_continue": not tool_failures,
+            "should_continue": not tool_failures and not no_completed_tools,
             "requires_human": requires_human,
             "summary": (
                 "Deep Agents completed enabled tools."
-                if not tool_failures
+                if not tool_failures and not no_completed_tools
+                else "Deep Agents skipped all tools because required input is unavailable."
+                if no_completed_tools
                 else "Deep Agents completed with tool failures."
             ),
-            "confidence": 0.8 if not tool_failures else 0.4,
+            "confidence": 0.8 if not tool_failures and not no_completed_tools else 0.0 if no_completed_tools else 0.4,
             "source": plan["source"],
             "notes": [item.get("detail", "") for item in tool_failures],
             "assistant_message": assistant_message,
@@ -309,10 +331,16 @@ class DeepAgentsV1HarnessProvider:
             "tool_results": tool_results,
             "tool_result_items": tool_result_items,
             "tool_failures": tool_failures,
+            "tool_skips": tool_skips,
             "synthesized_payload": synthesized_payload,
             "validation_issues": validation_issues,
             "quality_scores": quality_scores,
             "subagent_results": [],
+            "subagent_audits": build_skipped_subagent_audits(
+                request,
+                provider=self.version,
+                reason="Deep Agents v1 已禁用通用子代理派发，仅暴露项目阶段工具。",
+            ),
             "autoresearch_record_ids": autoresearch_record_ids,
             "traces": traces,
             "effects": [],
@@ -327,6 +355,15 @@ class DeepAgentsV1HarnessProvider:
             "model": llm.model if llm else None,
             "warnings": list(warnings),
         }
+        if result.subagent_audits:
+            result.traces.append(
+                {
+                    "step": "subagents.skipped",
+                    "provider": self.version,
+                    "count": len(result.subagent_audits),
+                    "reason": "provider_subagent_unsupported",
+                }
+            )
         return result
 
 
@@ -343,6 +380,7 @@ class _ToolResultCollector:
         self.tool_results: dict[str, dict[str, Any]] = {}
         self.tool_result_items: list[dict[str, Any]] = []
         self.tool_failures: list[dict[str, Any]] = []
+        self.tool_skips: list[dict[str, Any]] = []
 
     def record(self, tool_name: str, result: Any) -> None:
         item = {
@@ -358,28 +396,50 @@ class _ToolResultCollector:
     def record_failure(self, tool_name: str, exc: Exception) -> None:
         self.tool_failures.append({"tool_name": tool_name, "detail": str(exc)})
 
+    def record_adapted(self, tool_name: str, result: Any) -> None:
+        self.tool_result_items.append(result.to_result_item())
+        self.tool_results[tool_name] = dict(result.raw_output)
+
+    def record_skip(self, tool_name: str, result: Any) -> None:
+        self.tool_skips.append(result.to_skip_item())
+
+    def record_failure_detail(self, tool_name: str, failure: dict[str, Any]) -> None:
+        self.tool_failures.append({
+            **dict(failure),
+            "tool_name": tool_name,
+            "detail": str(failure.get("detail", "Tool failed")),
+        })
+
 
 def _build_project_tools(
     request: HarnessRequest,
     collector: _ToolResultCollector,
+    *,
+    tool_adapter: ToolAdapter,
+    llm_client: Any,
 ) -> list[Callable[..., str]]:
     """Wrap each enabled project tool as a Deep Agents callable."""
 
     def make_tool(tool_name: str) -> Callable[..., str]:
         def _tool(**kwargs: Any) -> str:
             """Call the project tool and return its result as JSON."""
-            result = invoke_tool(
-                tool_name=tool_name,
-                goal=request.goal,
-                stage_name=request.stage_name,
-                evidence_items=list(request.evidence_items),
-                vision_results=list(request.vision_results),
-                previous_stage_result=request.previous_stage_result,
+            result = tool_adapter.invoke(
+                request,
+                HarnessToolCall(tool_name=tool_name, reason="deepagents.react"),
+                llm_client=llm_client,
+                permission_adapter=request.options.get("permission_adapter"),
+                provider="deepagents-v1",
             )
-            collector.record(tool_name, result)
+            if result.status == "skipped_missing_input":
+                collector.record_skip(tool_name, result)
+                return json.dumps({"status": result.status, "summary": result.summary}, ensure_ascii=False)
+            if not result.success:
+                collector.record_failure_detail(tool_name, result.to_failure_item())
+                return json.dumps({"error": result.summary}, ensure_ascii=False)
+            collector.record_adapted(tool_name, result)
             return json.dumps(
                 {
-                    "name": result.name,
+                    "name": result.name or tool_name,
                     "summary": result.summary,
                     "raw_output": result.raw_output,
                     "evidence_refs": list(result.evidence_refs),
@@ -402,6 +462,18 @@ def _safe_enabled_tools(request: HarnessRequest) -> list[str]:
     if not allowed:
         return list(request.enabled_tools)
     return [tool for tool in request.enabled_tools if tool in allowed]
+
+
+def _resolve_tool_adapter(request: HarnessRequest) -> ToolAdapter:
+    """Use the request-scoped executor when supplied, otherwise build one."""
+    adapter = request.options.get("tool_adapter")
+    if isinstance(adapter, ToolAdapter):
+        return adapter
+    permission_adapter = request.options.get("permission_adapter")
+    return ToolAdapter(
+        tool_invoker=request.options.get("tool_invoker") or invoke_tool,
+        permission_adapter=permission_adapter if isinstance(permission_adapter, PermissionAdapter) else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -494,28 +566,9 @@ def _synthesize(
     return synthesized, validation_issues, quality_scores
 
 
-def _maybe_autoresearch(request: HarnessRequest) -> list[str]:
-    """Create an AutoResearch record when the auto-run condition permits."""
-    condition = str(request.options.get("auto_run_condition", "") or "manual")
-    if condition == "manual":
-        return []
-    if condition == "on_inputs_ready" and not request.evidence_items:
-        return []
-    try:
-        from src.apps.api.app.services.autoresearch_service import (
-            create_autoresearch_record,
-        )
-        stage_id = str(request.stage_id)
-        run_id = str(request.run_id)
-        if not stage_id or not run_id:
-            return []
-        record = create_autoresearch_record(
-            stage_id=stage_id, run_id=run_id, auto_run_condition=condition
-        )
-        return [record.id]
-    except Exception as exc:  # noqa: BLE001 — autoresearch must not fail the run
-        logger.warning("[deepagents_harness] autoresearch record failed: %s", exc, exc_info=True)
-        return []
+# AutoResearch 已从 harness 解耦（_maybe_autoresearch 已移除）。AutoResearch 作为
+# 独立能力提升轨道，只经专属 API（/autoresearch/*）显式触发；harness 不再内联
+# 生成记录。见 DOCS/design/2026-07-12-stage-harness-autoresearch-architecture.md。
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +578,9 @@ def _maybe_autoresearch(request: HarnessRequest) -> list[str]:
 
 def _build_llm_client(request: HarnessRequest) -> HarnessLLMClient | None:
     """Build a HarnessLLMClient from project settings (general model) or env."""
+    injected = request.options.get("llm_client")
+    if injected is not None:
+        return injected
     snapshot = request.options.get("settings_snapshot") or {}
     ocm = snapshot.get("openai_compatible_models_with_secrets") or {}
     general = ocm.get("general") or {}

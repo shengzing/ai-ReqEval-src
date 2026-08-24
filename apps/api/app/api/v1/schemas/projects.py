@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -65,6 +65,14 @@ class StageResultResponse(BaseModel):
     confirmation_ids: list[str]
     result_payload: dict
     summary: str
+    valid_result: bool = True
+    invalid_reason: Optional[str] = None
+    invalidated_at: Optional[datetime] = None
+    superseded_by_run_id: Optional[str] = None
+    # HCR-P1-02：first-class 溯源字段（旧 doc 为 None，仍可从
+    # result_payload 嵌套副本或 Run.config_version_id 复现）。
+    skill_name: Optional[str] = None
+    config_version_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     locked_at: Optional[datetime] = None
@@ -74,15 +82,24 @@ class StageResultListResponse(BaseModel):
     items: list[StageResultResponse]
 
 
+class StageLockCheckItemResponse(BaseModel):
+    key: str
+    label: str
+    passed: bool
+    machine_code: str
+    hint: str
+    object_id: Optional[str] = None
+
+
 class LockStageResponse(BaseModel):
     stage: StageResponse
     version_log_id: str
-    checks: list[dict]
+    checks: list[StageLockCheckItemResponse]
 
 
 class StageLockCheckResponse(BaseModel):
     stage_id: str
-    checks: list[dict]
+    checks: list[StageLockCheckItemResponse]
     ready: bool
 
 
@@ -98,6 +115,7 @@ class ConversationMessageResponse(BaseModel):
     source_event_id: Optional[str] = None
     run_id: Optional[str] = None
     action_proposals: list[dict] = Field(default_factory=list)
+    citations: list[dict] = Field(default_factory=list)
     harness_warnings: list[dict] = Field(default_factory=list)
     tool_calls: list[dict] = Field(default_factory=list)
     process_only: bool = False
@@ -150,11 +168,29 @@ class FileArtifactResponse(BaseModel):
     status: str
     storage_path: Optional[str] = None
     size_bytes: int = 0
+    relevance_status: str = "pending_parse"
+    relevance_score: float = 0.0
+    relevance_reasons: list[str] = Field(default_factory=list)
+    relevance_rule_version: str = ""
+    relevance_input_hash: str = ""
+    relevance_source: str = "machine"
+    relevance_review_reason: Optional[str] = None
+    relevance_reviewed_by: Optional[str] = None
+    relevance_reviewed_at: Optional[datetime] = None
+    # HCR-P1-03：人工复核前态（旧 doc 为 None）。
+    relevance_previous_status: Optional[str] = None
+    security_rejected: bool = False
     created_at: datetime
 
 
 class FileArtifactListResponse(BaseModel):
     items: list[FileArtifactResponse]
+
+
+class FileRelevanceReviewRequest(BaseModel):
+    decision: Literal["related", "unrelated", "rejected"]
+    reason: str = Field(min_length=3, max_length=500)
+    reviewer: str = Field(default="workspace_user", min_length=1, max_length=100)
 
 
 class FilePreviewResponse(BaseModel):
@@ -210,6 +246,17 @@ class EvidenceItemResponse(BaseModel):
     created_at: datetime
     status: str
     review_note: Optional[str] = None
+    relevance_status: str = "pending_parse"
+    relevance_score: float = 0.0
+    relevance_reasons: list[str] = Field(default_factory=list)
+    relevance_rule_version: str = ""
+    relevance_input_hash: str = ""
+    relevance_source: str = "machine"
+    relevance_review_reason: Optional[str] = None
+    relevance_reviewed_by: Optional[str] = None
+    relevance_reviewed_at: Optional[datetime] = None
+    # HCR-P1-03：人工复核前态（旧 doc 为 None）。
+    relevance_previous_status: Optional[str] = None
     updated_at: datetime
 
 
@@ -287,6 +334,7 @@ class AssistantHarnessMessageResponse(BaseModel):
     content: str
     created_at: datetime
     tool_calls: list[dict] = Field(default_factory=list)
+    citations: list[dict] = Field(default_factory=list)
 
 
 class ActionProposalSummary(BaseModel):
@@ -299,6 +347,7 @@ class ActionProposalSummary(BaseModel):
     title: str
     requires_confirmation: bool
     status: str = "pending"
+    confirmation_id: Optional[str] = None
 
 
 class HarnessSummary(BaseModel):
@@ -318,13 +367,15 @@ class ActionProposalResponse(BaseModel):
     status: str
     requires_confirmation: bool
     run_id: Optional[str] = None
+    confirmation_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
 
 class ConfirmActionProposalResponse(BaseModel):
     proposal: ActionProposalResponse
-    run_id: str
+    run_id: Optional[str] = None
+    confirmation_id: Optional[str] = None
 
 
 class AppendMessageResponse(BaseModel):

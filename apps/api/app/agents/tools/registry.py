@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from src.apps.api.app.agents.risk_semantic.vocabulary import RiskVocabulary
@@ -27,6 +27,10 @@ class ToolResult:
     raw_output: dict[str, Any]
     evidence_refs: list[str]
     warnings: list[str]
+    # A skipped tool was deliberately not executed and must never be
+    # aggregated into a business conclusion as if it had succeeded.
+    status: str = "completed"  # completed | skipped_missing_input
+    audit: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Label extraction patterns for document_parse ──────────────────────
@@ -390,6 +394,11 @@ def document_parse_tool(
     llm_client: Any = None,
 ) -> ToolResult:
     evidence_items = evidence_items or []
+    semantic_llm_client = (
+        llm_client
+        if llm_client is not None and getattr(llm_client, "is_configured", lambda: False)()
+        else None
+    )
     all_refs: list[str] = []
     all_snippets: list[str] = []
 
@@ -424,6 +433,7 @@ def document_parse_tool(
             },
             evidence_refs=[],
             warnings=["No evidence snippets available for parsing."],
+            status="skipped_missing_input",
         )
 
     fields = _extract_labeled_fields(combined_text)
@@ -436,7 +446,11 @@ def document_parse_tool(
 
     # Scenario type: infer from AI scope (LLM-first when available, keyword fallback)
     ai_scope = fields.get("ai_scope", "")
-    scenario_type = _infer_scenario_type(ai_scope=ai_scope, combined_text=combined_text, llm_client=llm_client)
+    scenario_type = _infer_scenario_type(
+        ai_scope=ai_scope,
+        combined_text=combined_text,
+        llm_client=semantic_llm_client,
+    )
 
     # Boundary
     in_scope = _split_semicolon_list(fields.get("ai_scope", ""))
@@ -481,7 +495,7 @@ def document_parse_tool(
         enrich_report = enrich_process_nodes_semantic(
             process_node_candidates,
             participants,
-            llm_client=llm_client,
+            llm_client=semantic_llm_client,
             input_objects=input_objects,
             output_objects=output_objects,
             manual_review_points=manual_review_points,
@@ -568,6 +582,28 @@ def risk_identify_tool(
                 all_text_parts.append(text)
 
     combined_text = "\n".join(all_text_parts)
+    if not combined_text.strip():
+        return ToolResult(
+            name="risk_identify",
+            summary="无可用证据，跳过风险识别。",
+            raw_output={
+                "risk_level": "",
+                "hitl_level": "",
+                "risk_items": [],
+                "risk_matrix": [],
+                "hitl_rules": [],
+                "prohibited_conditions": [],
+                "fatal_errors": [],
+                "audit_requirements": [],
+                "confidence": {},
+                "to_confirm": [],
+                "boundary_flag": False,
+                "evidence_refs": [],
+            },
+            evidence_refs=[],
+            warnings=["No evidence snippets available for risk identification."],
+            status="skipped_missing_input",
+        )
     primary_evidence_id = all_refs[0] if all_refs else "ev-unknown"
 
     # Build evidence_snippets mapping for keyword-overlap evidence binding (P1-evidence)
@@ -652,8 +688,10 @@ def risk_identify_tool(
 
     # Attempt semantic classification with LLM client
     from src.apps.api.app.agents.harness.llm import HarnessLLMClient
-    _injected_llm_client = llm_client
-    llm_client = _injected_llm_client if (_injected_llm_client is not None and getattr(_injected_llm_client, "is_configured", lambda: False)()) else HarnessLLMClient()
+    if llm_client is None:
+        llm_client = HarnessLLMClient()
+    if not getattr(llm_client, "is_configured", lambda: False)():
+        llm_client = None
     semantic_result = classify_risk_semantic(brief, llm_client=llm_client)
 
     if semantic_result.source == "llm":
@@ -1473,6 +1511,7 @@ def vision_parse_tool(
             },
             evidence_refs=[],
             warnings=["No vision results available."],
+            status="skipped_missing_input",
         )
 
     # Aggregate from all vision results

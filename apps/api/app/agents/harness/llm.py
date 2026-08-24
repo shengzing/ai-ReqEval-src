@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -146,6 +147,84 @@ class HarnessLLMClient:
 
     def is_configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
+
+    def ping(self, *, timeout: float | None = None) -> dict[str, Any]:
+        """Issue a minimal non-streaming chat/completions call to verify connectivity.
+
+        Used by the "测试模型" button in the settings UI. Returns a status dict
+        rather than raising: callers (HTTP route) translate it into a response.
+
+        Keys: ``ok`` (bool), ``latency_ms`` (int|None), ``message`` (str),
+        ``model`` (str), ``base_url`` (str). Never leaks the api_key.
+        """
+        result: dict[str, Any] = {
+            "ok": False,
+            "latency_ms": None,
+            "message": "",
+            "model": self.model,
+            "base_url": self.base_url,
+        }
+        if not self.is_configured():
+            missing = []
+            if not self.base_url:
+                missing.append("base_url")
+            if not self.api_key:
+                missing.append("api_key")
+            if not self.model:
+                missing.append("model_name")
+            result["message"] = "配置不完整：" + "、".join(missing)
+            return result
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "stream": False,
+            "max_tokens": 1,
+            "messages": [
+                {"role": "user", "content": "ping"},
+            ],
+        }
+        # 关闭推理链,避免某些 provider 把 max_tokens=1 全花在思考上
+        if not self.reasoning_mode:
+            payload["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        timeout_s = float(timeout if timeout is not None else self.timeout_seconds)
+        http_timeout = httpx.Timeout(
+            connect=timeout_s, read=timeout_s, write=timeout_s, pool=timeout_s,
+        )
+        client_kwargs: dict[str, Any] = {}
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
+        started = time.monotonic()
+        try:
+            with httpx.Client(**client_kwargs) as http_client:
+                response = http_client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=http_timeout,
+                )
+        except httpx.HTTPError as exc:
+            result["latency_ms"] = int((time.monotonic() - started) * 1000)
+            result["message"] = f"网络错误：{exc.__class__.__name__}"
+            return result
+        latency_ms = int((time.monotonic() - started) * 1000)
+        result["latency_ms"] = latency_ms
+        if response.status_code >= 400:
+            body = response.text
+            try:
+                parsed = json.loads(body)
+                detail = parsed.get("error") or parsed.get("detail") or parsed
+                if isinstance(detail, dict):
+                    detail = detail.get("message") or json.dumps(detail, ensure_ascii=False)
+                body = str(detail)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            result["message"] = f"HTTP {response.status_code}：{body[:200]}"
+            return result
+        result["ok"] = True
+        result["message"] = f"连接成功（{latency_ms} ms）"
+        return result
 
     def status(self, *, mode: str | None = None, message: str | None = None) -> dict[str, Any]:
         missing = []

@@ -19,11 +19,21 @@ def get_mongo_client() -> MongoClient:
             "MONGODB_USER, MONGODB_PASSWORD, MONGODB_HOST, MONGODB_PORT, "
             "DATABASE_NAME, and MONGODB_AUTH_SOURCE."
         )
+    # The MongoDB host is remote and shared (kgweb.roardata.cn:37017). After
+    # idle, the network/NAT reaps the TCP socket; the driver's next read then
+    # hangs on a dead socket until socketTimeoutMS fires _OperationCancelled
+    # (an AutoReconnect subclass). maxIdleTimeMS retires idle connections
+    # client-side before the server/NAT does, retryReads/retryWrites let the
+    # driver transparently re-run on a fresh socket, and the larger
+    # socketTimeoutMS avoids false cancellations on a momentarily slow hop.
     return MongoClient(
         settings.mongodb_uri,
-        serverSelectionTimeoutMS=3000,
-        connectTimeoutMS=3000,
-        socketTimeoutMS=5000,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        socketTimeoutMS=10000,
+        maxIdleTimeMS=30000,
+        retryReads=True,
+        retryWrites=True,
     )
 
 

@@ -15,10 +15,21 @@ from src.apps.api.app.agents.harness.serializers import serialize_harness_payloa
 from src.apps.api.app.agents.harness.state import NO_LLM_FALLBACK_MESSAGE
 from src.apps.api.app.core.harness_constants import DEFAULT_AGENT_HARNESS_VERSION
 from src.apps.api.app.domain.models import StageResult, utcnow
-from src.apps.api.app.repositories.store import get_latest_stage_result, save_stage_result
+from src.apps.api.app.repositories.store import (
+    get_latest_stage_result,
+    get_latest_valid_stage_result,
+    save_stage_result,
+)
 from src.apps.api.app.services.log_service import create_execution_log, create_version_log
-from src.apps.api.app.services.project_service import create_report, get_stage, list_evidence
-from src.apps.api.app.services.run_service import append_run_event, get_run
+from src.apps.api.app.services.project_service import (
+    IMAGE_PREVIEW_SUFFIXES,
+    PDF_PREVIEW_SUFFIXES,
+    create_report,
+    get_stage,
+    list_evidence,
+    list_files,
+)
+from src.apps.api.app.services.run_service import append_run_event, get_run, mark_run_waiting_inputs
 from src.apps.api.app.services.settings_service import filter_tools_for_skill, settings_snapshot
 from src.apps.api.app.services.stage_result_service import build_stage_result_diff
 from src.apps.api.app.services.vision_service import load_project_vision_results
@@ -27,6 +38,7 @@ from src.apps.api.app.services.stage1_contract import (
     compute_stage1_quality,
     normalize_hitl_level,
     normalize_risk_level,
+    stage1_requires_human_review,
     validate_stage1_summary,
 )
 from src.apps.api.app.services.stage2_contract import (
@@ -48,6 +60,24 @@ from src.apps.api.app.services.stage4_contract import (
     compute_stage4_quality,
     validate_stage4_summary,
 )
+
+
+def _stage_requires_human_review(*, skill_name: str) -> bool:
+    """Explicit per-Skill HITL checkpoint policy (HCR-P0-04).
+
+    Returns ``True`` when the Skill declares a non-``"never"`` ``hitl_policy``,
+    meaning the harness takes a durable checkpoint before its decision node so
+    the contract's L3/boundary gate can decide pause-vs-discard. This controls
+    *checkpoint-taking only*; the L3-mandatory human-review rule lives in
+    ``stage1_contract.stage1_requires_human_review`` and fires regardless of
+    this flag. An unknown skill name yields ``False`` (matching the previous
+    "non-``scenario_risk_skill`` ⇒ ``False``" behaviour) rather than raising.
+    """
+    try:
+        skill = get_skill_by_name(skill_name)
+    except KeyError:
+        return False
+    return skill.hitl_policy != "never"
 
 
 def _build_edges_from_nodes(process_nodes: list[dict]) -> dict:
@@ -473,7 +503,275 @@ def _build_stage_one_summary(
         tool_payload=tool_payload,
         vision_results=vision_results,
     )
-    return _bind_stage_one_risk_and_hitl_to_nodes({**phase_a, **phase_b}, llm_client=llm_client)
+    summary = _bind_stage_one_risk_and_hitl_to_nodes({**phase_a, **phase_b}, llm_client=llm_client)
+    # F2/F3 单项目级产物：跨系统链路与错误放大路径是步骤2「典型场景业务底稿」
+    # 的组成部分，属本项目自身流程，纯确定性派生，不新增 LLM 调用，不覆盖 LLM
+    # 合成候选已提供的同名字段（由 _selective_merge 阶段处理）。
+    #
+    # 注意：主案例定义 / 补充验证场景清单 / 材料清单是课题级产物（每个 Project
+    # 是一个独立案例；主案例与补充场景的区分是研究者在课题级做的研究对象决策，
+    # 不是单项目运行时产物），不应放进 scenario_summary。它们落在
+    # data/研究材料/01_场景解构与风险定级/01_场景筛选与边界确认/处理后产出/。
+    summary.setdefault("cross_system_links", _build_cross_system_links(summary))
+    summary.setdefault("error_amplification_paths", _build_error_amplification_paths(summary))
+    summary.setdefault("boundary_review_status", "business_pending")
+    return summary
+
+
+# ── Stage 1 F2/F3 product derivations ─────────────────────────────
+# These helpers derive step-2 artifacts from fields the existing tools
+# already populate. They are pure projections — no new tool, no new LLM
+# call — so they stay in lockstep with the evidence-driven Phase A/B
+# outputs above.
+
+# Known 贷后 monitoring / early-warning systems that may appear in process
+# node names or SOP text. Used by cross-system link derivation.
+_KNOWN_SYSTEMS: tuple[str, ...] = (
+    "预警平台", "预警系统", "贷后系统", "贷后管理", "风险监测", "风险系统",
+    "核心系统", "核心账务", "账务系统", "数据中台", "风控引擎", "规则引擎",
+    "客户管理系统", "客户经理系统", "CRM", "审批系统", "合规系统",
+)
+
+
+def _build_cross_system_links(summary: dict) -> list[dict]:
+    """F2 — 流程节点绑定的跨系统链路。
+
+    扫描 process_nodes 名称/输入/输出文本，识别已知系统并绑定到 node_id。
+    命中系统的节点生成一条 link；未命中系统的节点不生成，留给 to_confirm。
+    """
+    links: list[dict] = []
+    for node in (summary.get("process_nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("node_id", ""))
+        if not node_id:
+            continue
+        haystack = " ".join(
+            str(node.get(field, "")) for field in ("name", "input", "output")
+        )
+        systems = [sys for sys in _KNOWN_SYSTEMS if sys in haystack]
+        if not systems:
+            continue
+        links.append({
+            "node_id": node_id,
+            "node_name": str(node.get("name", "")),
+            "systems": systems,
+            "link_type": "data_flow" if any(
+                kw in str(node.get("name", "")) for kw in ("发送", "推送", "回传", "调用")
+            ) else "reference",
+        })
+    return links
+
+
+def _build_error_amplification_paths(summary: dict) -> list[dict]:
+    """F3 — 错误放大路径：从风险绑定节点向后推导放大链。
+
+    每条路径 = {起点风险节点 → 下游节点链}，含放大机制说明。纯确定性推导：
+    - 起点：绑定了 risk_item 或 hitl_rule 的 process node
+    - 下游：起点之后、至人工复核/处置/审计节点为止的节点链
+    - 放大机制：人工复核缺失 / 审计留痕缺失 / 处置环节缺失
+    """
+    process_nodes = [
+        node for node in (summary.get("process_nodes") or [])
+        if isinstance(node, dict) and node.get("node_id")
+    ]
+    if not process_nodes:
+        return []
+    node_ids = [str(node.get("node_id", "")) for node in process_nodes]
+    # 起点：绑定了风险项或 HITL 规则的节点
+    risk_node_ids = {
+        str(item.get("node_id", ""))
+        for item in (summary.get("risk_items") or [])
+        if isinstance(item, dict) and item.get("node_id")
+    }
+    hitl_node_ids = {
+        str(rule.get("node_id", ""))
+        for rule in (summary.get("hitl_rules") or [])
+        if isinstance(rule, dict) and rule.get("node_id")
+    }
+    start_ids = risk_node_ids | hitl_node_ids
+    # 终点：人工复核 / 处置 / 审计节点
+    terminal_keywords = ("复核", "确认", "审批", "处置", "审计", "合规")
+    terminal_ids = {
+        str(node.get("node_id", ""))
+        for node in process_nodes
+        if any(kw in str(node.get("name", "")) for kw in terminal_keywords)
+    }
+
+    paths: list[dict] = []
+    for start_id in sorted(start_ids):
+        if start_id not in node_ids:
+            continue
+        start_idx = node_ids.index(start_id)
+        # 下游链：从起点+1 到第一个终点（含终点），最长 4 步
+        downstream: list[str] = []
+        for nid in node_ids[start_idx + 1:]:
+            downstream.append(nid)
+            if nid in terminal_ids:
+                break
+            if len(downstream) >= 4:
+                break
+        if not downstream:
+            downstream = node_ids[start_idx + 1:start_idx + 2]
+        if not downstream:
+            continue
+        # 放大机制判定
+        mechanisms: list[str] = []
+        start_node = next((n for n in process_nodes if str(n.get("node_id", "")) == start_id), {})
+        if start_node.get("human_review_required") is not True:
+            mechanisms.append("起点节点缺少强制人工复核")
+        if not start_node.get("audit_fields"):
+            mechanisms.append("起点节点缺少审计留痕字段")
+        has_terminal = bool(set(downstream) & terminal_ids)
+        if not has_terminal:
+            mechanisms.append("下游链未到达复核/处置/审计节点")
+        risk_descriptions = [
+            str(item.get("item", ""))
+            for item in (summary.get("risk_items") or [])
+            if isinstance(item, dict) and str(item.get("node_id", "")) == start_id
+        ]
+        paths.append({
+            "path_id": f"eap-{len(paths) + 1}",
+            "start_node_id": start_id,
+            "start_node_name": str(start_node.get("name", "")),
+            "downstream_node_ids": downstream,
+            "trigger_risk": risk_descriptions[0] if risk_descriptions else "",
+            "amplification_mechanisms": mechanisms or ["未识别明确放大机制"],
+            "terminal_reached": has_terminal,
+        })
+    return paths
+
+
+def _emit_stage1_phase_events(
+    *,
+    run,
+    skill_name: str,
+    config_version_id: str | None,
+    scenario_summary: dict,
+    quality: dict,
+    validation_issues: list[dict],
+) -> None:
+    """Emit F1/F2/F3 推进事件，把阶段一聚合执行拆为三段可见步骤。
+
+    每段事件携带本段产物摘要 + 该段相关质量分/校验问题计数，供前端
+    ExecutionTimeline 渲染「场景边界 → 流程责任链 → 风险与HITL」三步。
+    事件复用既有 ``run.*`` 事件通道（``run.stage1_phase``），无需新通道。
+    """
+    boundary = scenario_summary.get("boundary") if isinstance(scenario_summary.get("boundary"), dict) else {}
+    process_nodes = scenario_summary.get("process_nodes") or []
+    responsibilities = scenario_summary.get("responsibilities") or []
+    cross_system_links = scenario_summary.get("cross_system_links") or []
+    risk_items = scenario_summary.get("risk_items") or []
+    hitl_rules = scenario_summary.get("hitl_rules") or []
+    error_paths = scenario_summary.get("error_amplification_paths") or []
+
+    high_issues = [i for i in validation_issues if i.get("severity") == "high"]
+    # F1 fields whose issues belong to the 场景边界 segment
+    f1_fields = {
+        "scenario_name", "boundary", "boundary_review_status",
+    }
+    f1_issues = [i for i in validation_issues if (i.get("field") or "").split(".")[0] in f1_fields]
+    # F2 fields — 流程责任链
+    f2_fields = {
+        "process_nodes", "edges", "main_path", "responsibilities",
+        "cross_system_links", "process_flow_diagram",
+    }
+    f2_issues = [i for i in validation_issues if (i.get("field") or "").split("[")[0].split(".")[0] in f2_fields]
+    # F3 fields — 风险与HITL
+    f3_fields = {
+        "risk_level", "hitl_level", "risk_items", "risk_matrix",
+        "hitl_rules", "prohibited_conditions", "fatal_errors",
+        "audit_requirements", "evidence_refs", "risk_confidence",
+        "error_amplification_paths",
+    }
+    f3_issues = [i for i in validation_issues if (i.get("field") or "").split(".")[0] in f3_fields]
+
+    append_run_event(
+        run,
+        "run.stage1_phase",
+        {
+            "skill_name": skill_name,
+            "config_version_id": config_version_id,
+            "phase": "F1",
+            "phase_name": "场景边界",
+            "step": "步骤1 筛选典型场景并界定研究对象",
+            "summary": "已完成场景解构与边界确认，形成本项目场景边界与认可状态。",
+            "products": {
+                "scenario_name": scenario_summary.get("scenario_name", ""),
+                "scenario_type": scenario_summary.get("scenario_type", ""),
+                "boundary": {
+                    "in_scope": list(boundary.get("in_scope", []) or []),
+                    "out_of_scope": list(boundary.get("out_of_scope", []) or []),
+                    "preconditions": list(boundary.get("preconditions", []) or []),
+                    "data_boundary": list(boundary.get("data_boundary", []) or []),
+                },
+                "boundary_review_status": scenario_summary.get("boundary_review_status", "business_pending"),
+            },
+            "quality": {
+                "completeness_score": quality.get("completeness_score"),
+            },
+            "issue_count": len(f1_issues),
+            "high_issue_count": sum(1 for i in f1_issues if i.get("severity") == "high"),
+        },
+    )
+    append_run_event(
+        run,
+        "run.stage1_phase",
+        {
+            "skill_name": skill_name,
+            "config_version_id": config_version_id,
+            "phase": "F2",
+            "phase_name": "流程责任链",
+            "step": "步骤2 SOP与责任链梳理",
+            "summary": "已完成业务底稿梳理，生成流程节点、责任链与跨系统链路。",
+            "products": {
+                "process_node_count": len(process_nodes),
+                "responsibility_count": len(responsibilities),
+                "cross_system_link_count": len(cross_system_links),
+                "edges_count": len(scenario_summary.get("edges") or []),
+                "main_path_length": len(scenario_summary.get("main_path") or []),
+            },
+            "quality": {
+                "process_node_completeness_score": quality.get("process_node_completeness_score"),
+                "responsibility_chain_score": quality.get("responsibility_chain_score"),
+                "cross_system_link_score": quality.get("cross_system_link_score"),
+                "flow_diagram_score": quality.get("flow_diagram_score"),
+            },
+            "issue_count": len(f2_issues),
+            "high_issue_count": sum(1 for i in f2_issues if i.get("severity") == "high"),
+        },
+    )
+    append_run_event(
+        run,
+        "run.stage1_phase",
+        {
+            "skill_name": skill_name,
+            "config_version_id": config_version_id,
+            "phase": "F3",
+            "phase_name": "风险与HITL",
+            "step": "步骤3 风险分级与HITL定级",
+            "summary": "已完成风险定级与HITL约束映射，生成风险矩阵、禁入条件与错误放大路径。",
+            "products": {
+                "risk_level": scenario_summary.get("risk_level", ""),
+                "hitl_level": scenario_summary.get("hitl_level", ""),
+                "risk_item_count": len(risk_items),
+                "hitl_rule_count": len(hitl_rules),
+                "error_amplification_path_count": len(error_paths),
+                "prohibited_condition_count": len(scenario_summary.get("prohibited_conditions") or []),
+                "fatal_error_count": len(scenario_summary.get("fatal_errors") or []),
+            },
+            "quality": {
+                "risk_consistency_score": quality.get("risk_consistency_score"),
+                "hitl_alignment_score": quality.get("hitl_alignment_score"),
+                "risk_node_binding_score": quality.get("risk_node_binding_score"),
+                "error_path_coverage_score": quality.get("error_path_coverage_score"),
+                "audit_readiness_score": quality.get("audit_readiness_score"),
+            },
+            "issue_count": len(f3_issues),
+            "high_issue_count": sum(1 for i in f3_issues if i.get("severity") == "high"),
+            "requires_human": bool(scenario_summary.get("risk_level") == "L3" or scenario_summary.get("boundary_flag")),
+        },
+    )
 
 
 def _build_stage_two_summary(*, goal: str, stage_name: str, tool_payload: dict, previous_stage_result: dict | None) -> dict:
@@ -838,6 +1136,9 @@ def _selective_merge_stage_one_llm_candidate(
         "risk_items", "risk_matrix", "hitl_rules", "participants",
         "process_nodes", "audit_requirements", "evidence_refs",
         "edges", "main_path",
+        # F2/F3 derived list artifacts — adopt LLM candidate's substantive
+        # version when better than the deterministic fallback.
+        "cross_system_links", "error_amplification_paths",
     )
 
     for field in _LIST_FIELDS:
@@ -875,6 +1176,7 @@ def _selective_merge_stage_one_llm_candidate(
     _SCALAR_FIELDS = (
         "scenario_name", "boundary", "risk_confidence",
         "boundary_flag", "error_amplification_path",
+        "boundary_review_status",
     )
 
     for field in _SCALAR_FIELDS:
@@ -1075,10 +1377,187 @@ def _collect_tool_warnings(tool_result_items: list[dict]) -> list[dict]:
     return warnings
 
 
+def _normalize_subagent_audits(raw_audits: object) -> list[dict[str, Any]]:
+    """Normalize provider audit records before persistence and event emission.
+
+    Providers intentionally retain only safe summaries.  This defensive
+    boundary prevents a custom or future provider from accidentally storing a
+    rich prompt/response body in the Run event stream.
+    """
+
+    def _safe_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _safe_float(value: object) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if not isinstance(raw_audits, list):
+        return []
+    audits: list[dict[str, Any]] = []
+    for item in raw_audits:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("subagent_name", ""))
+        invocation_id = str(item.get("invocation_id", ""))
+        status_value = str(item.get("status", ""))
+        if not name or not invocation_id or status_value not in {"completed", "failed", "skipped"}:
+            continue
+        raw_input_summary = item.get("input_summary")
+        raw_output_summary = item.get("output_summary")
+        raw_failure = item.get("failure")
+        evidence_refs = item.get("evidence_refs")
+        input_summary = dict(raw_input_summary) if isinstance(raw_input_summary, dict) else {}
+        output_summary = dict(raw_output_summary) if isinstance(raw_output_summary, dict) else {}
+        failure = dict(raw_failure) if isinstance(raw_failure, dict) else None
+        audits.append(
+            {
+                "subagent_name": name,
+                "invocation_id": invocation_id,
+                "status": status_value,
+                "input_summary": {
+                    "goal_hash": str(input_summary.get("goal_hash", "")),
+                    "stage_name": str(input_summary.get("stage_name", ""))[:200],
+                    "tool_names": [str(value)[:200] for value in input_summary.get("tool_names", [])]
+                    if isinstance(input_summary.get("tool_names"), list) else [],
+                    "tool_result_count": _safe_int(input_summary.get("tool_result_count", 0)),
+                    "previous_stage_result_present": bool(input_summary.get("previous_stage_result_present", False)),
+                    "input_hash": str(input_summary.get("input_hash", "")),
+                },
+                "output_summary": {
+                    "summary": str(output_summary.get("summary", ""))[:500],
+                    "review_status": str(output_summary.get("review_status", ""))[:50],
+                    "confidence": _safe_float(output_summary.get("confidence", 0.0)),
+                    "issue_count": _safe_int(output_summary.get("issue_count", 0)),
+                    "suggestion_count": _safe_int(output_summary.get("suggestion_count", 0)),
+                    "output_hash": str(output_summary.get("output_hash", "")),
+                },
+                "failure": {
+                    "code": str(failure.get("code", ""))[:100],
+                    "detail": str(failure.get("detail", ""))[:500],
+                } if failure else None,
+                "duration_ms": _safe_float(item.get("duration_ms", 0.0)),
+                "evidence_refs": [str(ref)[:200] for ref in evidence_refs[:100] if str(ref)]
+                if isinstance(evidence_refs, list) else [],
+                "review_status": str(item.get("review_status", ""))[:50],
+                "adoption_status": str(item.get("adoption_status", "not_adopted"))[:50],
+                "adoption_reason": str(item.get("adoption_reason", ""))[:500],
+                "provider": str(item.get("provider", ""))[:100],
+            }
+        )
+    return audits
+
+
+def _append_subagent_audit_events(
+    *,
+    run: Any,
+    skill_name: str,
+    subagent_audits: list[dict[str, Any]],
+) -> None:
+    """Write one normalized RunEvent per subagent invocation.
+
+    Actual executions receive a started + terminal pair. Provider capability
+    skips receive only the skipped terminal event because no invocation ran.
+    ``invocation_id`` makes UI grouping deterministic and keeps these nodes
+    separate from tool-call counts.
+    """
+
+    config_version_id = getattr(run, "config_version_id", None)
+    for audit in subagent_audits:
+        outcome = str(audit["status"])
+        if outcome != "skipped":
+            append_run_event(
+                run,
+                "run.subagent_started",
+                {
+                    "skill_name": skill_name,
+                    "config_version_id": config_version_id,
+                    "subagent_name": audit["subagent_name"],
+                    "invocation_id": audit["invocation_id"],
+                    "status": "running",
+                    "input_summary": dict(audit["input_summary"]),
+                    "provider": audit["provider"],
+                },
+            )
+        append_run_event(
+            run,
+            f"run.subagent_{outcome}",
+            {
+                "skill_name": skill_name,
+                "config_version_id": config_version_id,
+                "subagent_name": audit["subagent_name"],
+                "invocation_id": audit["invocation_id"],
+                "status": outcome,
+                "input_summary": dict(audit["input_summary"]),
+                "output_summary": dict(audit["output_summary"]),
+                "failure": dict(audit["failure"]) if audit["failure"] else None,
+                "duration_ms": audit["duration_ms"],
+                "evidence_refs": list(audit["evidence_refs"]),
+                "review_status": audit["review_status"],
+                "adoption_status": audit["adoption_status"],
+                "adoption_reason": audit["adoption_reason"],
+                "provider": audit["provider"],
+            },
+        )
+
+
 def list_skills(stage_id: Optional[str] = None) -> list[SkillDefinition]:
     if stage_id is not None:
         _ = get_stage(stage_id)
     return registry_list_skills(stage_id)
+
+
+# ── HCR-P0-01(4): vision_parse only when the project has visual material ──
+# Pure-text projects must not plan a vision tool that can only skip.
+_VISUAL_SUFFIXES = IMAGE_PREVIEW_SUFFIXES | PDF_PREVIEW_SUFFIXES
+
+
+def _is_visual_artifact(artifact: Any) -> bool:
+    """True when an uploaded file is an image or PDF (scanned page included).
+
+    Mirrors the detection used by ``project_service.get_file_preview`` so the
+    gate and the preview agree on what counts as "visual material".
+    """
+    content_type = (getattr(artifact, "content_type", "") or "").lower()
+    filename = (getattr(artifact, "filename", "") or "").lower()
+    suffix = "." + filename.rsplit(".", 1)[-1] if "." in filename else ""
+    return (
+        content_type.startswith("image/")
+        or content_type == "application/pdf"
+        or suffix in _VISUAL_SUFFIXES
+    )
+
+
+def _vision_parse_should_be_enabled(
+    *,
+    skill_name: str,
+    vision_results: list[dict],
+    files: list[Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Return ``(enabled, signals)``.
+
+    ``vision_parse`` is enabled when the project actually has visual material
+    to parse: either prior vision results exist (``vision_parse_evidence``
+    already ran, leaving ``*.vision.json``) or the project contains an
+    image/PDF file. Pure-text projects disable it so the tool is never planned
+    for material it cannot meaningfully consume. Non-stage-1 skills are
+    unaffected (``vision_parse`` is only declared on ``scenario_risk_skill``).
+    """
+    if skill_name != "scenario_risk_skill":
+        return True, {"reason": "not_stage1_skill"}
+    has_vision_results = bool(vision_results)
+    has_visual_file = any(_is_visual_artifact(f) for f in files) if files else False
+    enabled = has_vision_results or has_visual_file
+    return enabled, {
+        "has_vision_results": has_vision_results,
+        "has_visual_file": has_visual_file,
+        "reason": "vision_material_present" if enabled else "pure_text_project",
+    }
 
 
 def _build_stage_result_from_base(
@@ -1101,7 +1580,12 @@ def _build_stage_result_from_base(
         autoresearch_record_ids=list(base_result.autoresearch_record_ids),
         confirmation_ids=list(base_result.confirmation_ids),
         result_payload=dict(base_result.result_payload),
+        valid_result=base_result.valid_result,
+        invalid_reason=base_result.invalid_reason,
         summary=base_result.summary,
+        # HCR-P1-02：first-class 溯源字段随 base 复制，保留可追溯链。
+        skill_name=base_result.skill_name,
+        config_version_id=base_result.config_version_id,
     )
 
 
@@ -1128,30 +1612,12 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         "run.skill_started",
         {
             "skill_name": skill.name,
+            "config_version_id": run.config_version_id,
             "tool_names": skill.allowed_tools,
             "subagent_names": skill.allowed_subagents,
             "source": "skill.invoke",
         },
     )
-
-    latest_result = get_latest_stage_result(stage_id)
-    if latest_result is None:
-        # Auto-create a draft StageResult for the first run on this stage
-        snapshot = settings_snapshot(project_id, stage_id, config_version_id=run.config_version_id)
-        latest_result = StageResult(
-            id=f"stage-result-{uuid4().hex[:8]}",
-            project_id=project_id,
-            stage_id=stage_id,
-            version_id=f"sv-{uuid4().hex[:8]}",
-            base_version_id=None,
-            run_id=run_id,
-            status="draft",
-            model_config=snapshot["model_config"],
-            skill_versions=snapshot["skill_versions"],
-            result_payload={"goal": goal},
-            summary="Auto-created draft stage result for first skill invocation.",
-        )
-        save_stage_result(latest_result)
 
     enabled_tools, enabled_subagents = filter_tools_for_skill(
         project_id=project_id,
@@ -1166,14 +1632,167 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         "run.skill_filtered",
         {
             "skill_name": skill.name,
+            "config_version_id": run.config_version_id,
             "enabled_tools": enabled_tools,
             "enabled_subagents": enabled_subagents,
             "source": "settings.filter",
         },
     )
 
-    evidence_items = list_evidence(project_id)
+    all_evidence_items = list_evidence(project_id)
+    evidence_items = [
+        item for item in all_evidence_items
+        if item.relevance_status == "related"
+    ]
+    excluded_evidence = [
+        item for item in all_evidence_items
+        if item.relevance_status != "related"
+    ]
+    if excluded_evidence:
+        append_run_event(
+            run,
+            "run.evidence_filtered",
+            {
+                "included_evidence_ids": [item.id for item in evidence_items],
+                "excluded_evidence": [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "relevance_status": item.relevance_status,
+                        "relevance_reasons": list(item.relevance_reasons),
+                    }
+                    for item in excluded_evidence
+                ],
+                "reason": "Only project-related evidence may enter stage execution.",
+            },
+        )
+
+    # Stage 1 is evidence-led.  Do not instantiate a StageResult or a
+    # HarnessRequest until at least one parsed, project-related EvidenceItem
+    # exists.  This prevents the document/risk tools from turning an empty
+    # input into a formal-looking L1/none conclusion.
+    if skill.stage_suffix == "stage-1" and not evidence_items:
+        waiting_reason = "missing_related_evidence"
+        project_files = list_files(project_id)
+        pending_file_count = sum(
+            1
+            for item in project_files
+            if item.status != "parsed" or item.relevance_status != "related"
+        )
+        waiting_message = (
+            f"当前无法重新运行：{pending_file_count} 份材料尚未完成解析并确认相关。"
+            "请先在“阶段输入”中解析材料并确认相关性，然后重新运行。"
+            if pending_file_count
+            else "当前无法运行阶段一：尚未上传并确认项目相关材料。"
+            "请先在“阶段输入”中上传材料、完成解析并确认相关性。"
+        )
+        file_statuses = [
+            {
+                "id": item.id,
+                "name": item.filename,
+                "status": item.status,
+                "relevance_status": item.relevance_status,
+                "relevance_reasons": list(item.relevance_reasons),
+            }
+            for item in project_files
+        ]
+        mark_run_waiting_inputs(run, reason=waiting_reason)
+        append_run_event(
+            run,
+            "run.waiting_inputs",
+            {
+                "reason": waiting_reason,
+                "message": waiting_message,
+                "included_evidence_ids": [],
+                "excluded_evidence": file_statuses,
+                "next_actions": ["解析上传文件", "确认材料与项目相关", "重新执行阶段一"],
+            },
+        )
+        return {
+            "skill_name": skill.name,
+            "stage_id": stage_id,
+            "project_id": project_id,
+            "summary": "等待可用的项目相关证据，未执行阶段分析。",
+            "tool_names": list(skill.allowed_tools),
+            "subagent_names": list(skill.allowed_subagents),
+            "enabled_tools": enabled_tools,
+            "enabled_subagents": enabled_subagents,
+            "config_version_id": run.config_version_id,
+            "goal": goal,
+            "stage_result_id": None,
+            "report_id": None,
+            "tool_results": [],
+            "tool_failures": [],
+            "decision": {"should_continue": False, "requires_human": False, "source": "input_gate"},
+            "execution_status": "waiting_inputs",
+            "waiting_reason": waiting_reason,
+            "warnings": [{
+                "code": waiting_reason,
+                "message": waiting_message,
+            }],
+        }
+
+    latest_result = get_latest_stage_result(stage_id)
+    if latest_result is None:
+        # Auto-create only after input gating has accepted the first stage
+        # execution. A missing-input Run must not manufacture a draft result.
+        snapshot = settings_snapshot(project_id, stage_id, config_version_id=run.config_version_id)
+        latest_result = StageResult(
+            id=f"stage-result-{uuid4().hex[:8]}",
+            project_id=project_id,
+            stage_id=stage_id,
+            version_id=f"sv-{uuid4().hex[:8]}",
+            base_version_id=None,
+            run_id=run_id,
+            status="draft",
+            model_config=snapshot["model_config"],
+            skill_versions=snapshot["skill_versions"],
+            result_payload={"goal": goal},
+            summary="Auto-created draft stage result for accepted skill invocation.",
+            valid_result=False,
+            invalid_reason="awaiting_harness_result",
+            skill_name=skill.name,
+            config_version_id=snapshot["config_version_id"],
+        )
+        save_stage_result(latest_result)
     vision_results = load_project_vision_results(project_id)
+
+    # HCR-P0-01(4): vision_parse is only meaningful when the project actually
+    # has visual material (prior vision_parse_evidence results or an
+    # image/PDF file). A pure-text project must not plan a vision tool that
+    # can only skip — the tool would emit a meaningless tool.skipped trace
+    # and inflate the step list. Filter it out of enabled_tools *before*
+    # building the HarnessRequest so no planner ever sees it. declared
+    # allowed_tools is left intact for audit/reproducibility.
+    removed_tools: list[str] = []
+    try:
+        vision_files = list_files(project_id)
+        vision_enabled, vision_signals = _vision_parse_should_be_enabled(
+            skill_name=skill.name,
+            vision_results=vision_results,
+            files=vision_files,
+        )
+        if not vision_enabled and "vision_parse" in enabled_tools:
+            enabled_tools = [tool for tool in enabled_tools if tool != "vision_parse"]
+            removed_tools.append("vision_parse")
+    except Exception:  # noqa: BLE001
+        # Degrade safely: if the file listing or signal computation is
+        # unavailable, keep vision_parse enabled (matches pre-gate behaviour)
+        # rather than risk removing a tool that should have run. The filter
+        # is best-effort; a false-keep is acceptable, a false-remove is not.
+        vision_signals = {"reason": "gate_unavailable"}
+    if removed_tools:
+        append_run_event(
+            run,
+            "run.tool_filtered",
+            {
+                "skill_name": skill.name,
+                "config_version_id": run.config_version_id,
+                "removed_tools": removed_tools,
+                "reason": vision_signals.get("reason", ""),
+                "signals": vision_signals,
+            },
+        )
 
     # For Stage 2+: load previous stage result and pass to tools
     previous_stage_result = None
@@ -1184,7 +1803,7 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         current_stage_idx = next((i for i, s in enumerate(stages) if s.id == stage_id), -1)
         if current_stage_idx > 0:
             prev_stage = stages[current_stage_idx - 1]
-            prev_result = get_latest_stage_result(prev_stage.id)
+            prev_result = get_latest_valid_stage_result(prev_stage.id)
             if prev_result is not None:
                 previous_stage_result = dict(prev_result.result_payload)
     previous_stage_issues = _validate_previous_stage_result_for_skill(skill=skill, previous_stage_result=previous_stage_result)
@@ -1194,6 +1813,7 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             "run.harness_decision",
             {
                 "skill_name": skill.name,
+                "config_version_id": run.config_version_id,
                 "decision_source": "precondition",
                 "should_continue": False,
                 "confidence": 1.0,
@@ -1214,6 +1834,17 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
     if latest_result.status == "locked" or latest_result.run_id != run_id:
         current_result = _build_stage_result_from_base(base_result=latest_result, run_id=run_id)
     snapshot = settings_snapshot(project_id, stage_id, config_version_id=run.config_version_id)
+    # HCR-P1-02: 从冻结 snapshot 提取 primary_skill/enabled_skills，与
+    # Run 的去规范化副本并存。snapshot 无该 stage profile（静态回退）时为空。
+    _route_profile = next(
+        (p for p in snapshot.get("stage_skill_profiles", []) if p.get("stage_id") == stage_id),
+        None,
+    )
+    _route_primary_skill = str(_route_profile.get("primary_skill") or "") if _route_profile else ""
+    _route_enabled_skills = list(_route_profile.get("enabled_skills") or []) if _route_profile else []
+    # 同步 first-class 溯源字段（与下方 result_payload 嵌套副本并存）。
+    current_result.skill_name = skill.name
+    current_result.config_version_id = snapshot["config_version_id"]
     current_result.model_config = {
         **dict(current_result.model_config),
         **snapshot["model_config"],
@@ -1284,6 +1915,8 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         vision_results=vision_results,
         previous_stage_result=previous_stage_result,
         config_version_id=snapshot["config_version_id"],
+        primary_skill=_route_primary_skill,
+        enabled_skills=list(_route_enabled_skills),
         prompt_templates=dict(snapshot.get("prompt_bodies") or {}),
         prompt_versions={
             str(ref.get("id", "")): str(ref.get("version", "v1"))
@@ -1293,6 +1926,8 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         prompt_hashes=dict(current_result.prompt_hashes),
         options={
             "llm_client": llm_client,
+            "enable_hitl": _stage_requires_human_review(skill_name=skill.name),
+            "harness_thread_id": f"thread-{run_id}",
             "auto_run_condition": next(
                 (
                     profile.get("auto_run_condition")
@@ -1309,17 +1944,53 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
     current_result.model_config["harness_graph_version"] = harness_payload.get("graph_version")
     plan_payload = dict(harness_state.get("plan", {}))
     decision_payload = dict(harness_state.get("decision", {}))
+    checkpoint_payload = dict(harness_state.get("checkpoint", {}))
+    if checkpoint_payload.get("status") == "paused":
+        run.harness_thread_id = str(checkpoint_payload.get("thread_id") or f"thread-{run_id}")
+        run.harness_checkpoint_status = "paused"
+        # Mirror a client-supplied resumer onto the Run so the resume route can
+        # refuse an unexpected caller. The value comes from the request
+        # context (allowed_resumer option); it is a plain string, NOT a real
+        # auth principal — the project has no identity system yet.
+        run.allowed_resumer = str(harness_request.options.get("allowed_resumer") or "") or None
     planned_tool_names = list(plan_payload.get("tool_names", []))
     tool_payload = dict(harness_state.get("tool_results", {}))
     tool_result_items = [dict(item) for item in harness_state.get("tool_result_items", [])]
     tool_result_by_name = {str(item.get("name", "")): item for item in tool_result_items}
     tool_failures = [
-        {"tool_name": str(item.get("tool_name", "")), "detail": str(item.get("detail", "Tool failed"))}
+        {
+            "tool_name": str(item.get("tool_name", "")),
+            "detail": str(item.get("detail", "Tool failed")),
+            "status": str(item.get("status", "failed")),
+            "audit": dict(item.get("audit", {})),
+        }
         for item in harness_state.get("tool_failures", [])
     ]
     tool_failure_by_name = {item["tool_name"]: item for item in tool_failures}
+    tool_skips = [
+        {
+            "tool_name": str(item.get("tool_name", "")),
+            "status": str(item.get("status", "skipped_missing_input")),
+            "summary": str(item.get("summary", "Tool skipped")),
+            "warnings": list(item.get("warnings", [])),
+            "audit": dict(item.get("audit", {})),
+        }
+        for item in harness_state.get("tool_skips", [])
+    ]
+    tool_skip_by_name = {item["tool_name"]: item for item in tool_skips}
+    subagent_audits = _normalize_subagent_audits(harness_state.get("subagent_audits", []))
+    # Persist the provider-normalized audit with the Harness payload and emit
+    # terminal RunEvents before the Harness decision.  The same audit is
+    # thereby queryable from either StageResult or a Run-only timeline.
+    harness_payload["subagent_audits"] = subagent_audits
     llm_status = dict(harness_payload.get("llm_status", {}))
     warnings = []
+    if excluded_evidence:
+        warnings.append({
+            "code": "evidence_relevance_filtered",
+            "message": "已排除非相关或待确认材料，不会将其用于本次阶段分析。",
+            "excluded_evidence_ids": [item.id for item in excluded_evidence],
+        })
     previous_stage_warnings = _collect_previous_stage_warnings(skill=skill, previous_stage_result=previous_stage_result)
     warnings.extend(previous_stage_warnings)
     if llm_status.get("configured") is False:
@@ -1350,6 +2021,7 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         "run.harness_planned",
         {
             "skill_name": skill.name,
+            "config_version_id": run.config_version_id,
             "plan_source": plan_payload.get("source", "fallback"),
             "tool_names": planned_tool_names,
             "graph_version": harness_payload.get("graph_version"),
@@ -1357,38 +2029,94 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         },
     )
     for tool_name in planned_tool_names:
-        append_run_event(run, "run.tool_started", {"skill_name": skill.name, "tool_name": tool_name})
         tool_result_item = tool_result_by_name.get(tool_name)
         if tool_result_item is not None:
+            audit = dict(tool_result_item.get("audit", {}))
+            append_run_event(
+                run,
+                "run.tool_started",
+                {
+                    "skill_name": skill.name,
+                    "config_version_id": run.config_version_id,
+                    "tool_name": tool_name,
+                    "invocation_id": audit.get("invocation_id"),
+                    "provider": audit.get("provider"),
+                },
+            )
             append_run_event(
                 run,
                 "run.tool_completed",
                 {
                     "skill_name": skill.name,
+                    "config_version_id": run.config_version_id,
                     "tool_name": tool_name,
                     "summary": tool_result_item.get("summary", ""),
                     "raw_output": tool_result_item.get("raw_output", {}),
                     "evidence_refs": tool_result_item.get("evidence_refs", []),
                     "warnings": tool_result_item.get("warnings", []),
+                    "invocation_id": audit.get("invocation_id"),
+                    "provider": audit.get("provider"),
+                    "permission_decision": audit.get("permission_decision"),
+                    "duration_ms": audit.get("duration_ms"),
+                },
+            )
+        elif tool_name in tool_skip_by_name:
+            skipped = tool_skip_by_name[tool_name]
+            audit = dict(skipped.get("audit", {}))
+            append_run_event(
+                run,
+                "run.tool_skipped",
+                {
+                    "skill_name": skill.name,
+                    "config_version_id": run.config_version_id,
+                    "tool_name": tool_name,
+                    "reason": skipped["status"],
+                    "summary": skipped["summary"],
+                    "warnings": skipped["warnings"],
+                    "invocation_id": audit.get("invocation_id"),
+                    "provider": audit.get("provider"),
+                    "permission_decision": audit.get("permission_decision"),
                 },
             )
         else:
             failure = tool_failure_by_name.get(tool_name, {"detail": "Tool failed"})
+            audit = dict(failure.get("audit", {}))
             append_run_event(
                 run,
-                "run.tool_completed",
+                "run.tool_started",
                 {
                     "skill_name": skill.name,
+                    "config_version_id": run.config_version_id,
+                    "tool_name": tool_name,
+                    "invocation_id": audit.get("invocation_id"),
+                    "provider": audit.get("provider"),
+                },
+            )
+            append_run_event(
+                run,
+                "run.tool_failed",
+                {
+                    "skill_name": skill.name,
+                    "config_version_id": run.config_version_id,
                     "tool_name": tool_name,
                     "summary": "Tool failed: {0}".format(failure.get("detail", "Tool failed")),
                     "status": "failed",
+                    "invocation_id": audit.get("invocation_id"),
+                    "provider": audit.get("provider"),
+                    "permission_decision": audit.get("permission_decision"),
                 },
             )
+    _append_subagent_audit_events(
+        run=run,
+        skill_name=skill.name,
+        subagent_audits=subagent_audits,
+    )
     append_run_event(
         run,
         "run.harness_decision",
         {
             "skill_name": skill.name,
+            "config_version_id": run.config_version_id,
             "plan_source": plan_payload.get("source", "fallback"),
             "decision_source": decision_payload.get("source", "fallback"),
             "should_continue": bool(decision_payload.get("should_continue", False)),
@@ -1408,12 +2136,67 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         "source": decision_payload.get("source", "fallback"),
         "3d_alignment": dict(decision_payload.get("3d_alignment", {})),
     }
+    if checkpoint_payload:
+        persisted_decision["checkpoint"] = checkpoint_payload
+    if tool_skips:
+        persisted_decision["tool_skips"] = tool_skips
+    if tool_skips and not tool_result_items and not tool_failures:
+        current_result.status = "draft"
+        current_result.valid_result = False
+        current_result.invalid_reason = "missing_input"
+        current_result.skill_name = skill.name
+        current_result.config_version_id = snapshot["config_version_id"]
+        current_result.result_payload = {
+            **dict(current_result.result_payload),
+            "skill_name": skill.name,
+            "tool_skips": tool_skips,
+            "harness": {
+                **harness_payload,
+                "plan": {
+                    "tool_names": planned_tool_names,
+                    "reasoning": plan_payload.get("reasoning", ""),
+                    "source": plan_payload.get("source", "fallback"),
+                },
+                "decision": persisted_decision,
+            },
+        }
+        current_result.summary = "Skill execution skipped because required input is unavailable."
+        current_result.updated_at = utcnow()
+        save_stage_result(current_result)
+        return {
+            "skill_name": skill.name,
+            "stage_id": stage_id,
+            "project_id": project_id,
+            "summary": "等待可用输入，未生成正式阶段结论。",
+            "tool_names": list(skill.allowed_tools),
+            "subagent_names": list(skill.allowed_subagents),
+            "enabled_tools": enabled_tools,
+            "enabled_subagents": enabled_subagents,
+            "config_version_id": snapshot["config_version_id"],
+            "goal": goal,
+            "stage_result_id": current_result.id,
+            "report_id": None,
+            "tool_results": [],
+            "tool_failures": [],
+            "tool_skips": tool_skips,
+            "decision": persisted_decision,
+            "execution_status": "waiting_inputs",
+            "warnings": warnings + [{
+                "code": "missing_input",
+                "message": "所有计划工具均因缺少必要输入而跳过。",
+            }],
+        }
     if tool_failures:
         current_result.status = "draft"
+        current_result.valid_result = False
+        current_result.invalid_reason = "tool_failures"
+        current_result.skill_name = skill.name
+        current_result.config_version_id = snapshot["config_version_id"]
         current_result.result_payload = {
             **dict(current_result.result_payload),
             "skill_name": skill.name,
             "tool_failures": tool_failures,
+            "tool_skips": tool_skips,
             "harness": {
                 **harness_payload,
                 "plan": {
@@ -1449,6 +2232,10 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             "stage_result_id": current_result.id,
             "report_id": None,
             "tool_results": tool_results,
+            "tool_failures": tool_failures,
+            "tool_skips": tool_skips,
+            "decision": persisted_decision,
+            "execution_status": "failed",
             "warnings": warnings,
         }
 
@@ -1467,11 +2254,17 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         autoresearch_record_ids=list(latest_result.autoresearch_record_ids),
         confirmation_ids=list(latest_result.confirmation_ids),
         result_payload=dict(latest_result.result_payload),
+        valid_result=latest_result.valid_result,
+        invalid_reason=latest_result.invalid_reason,
         summary=latest_result.summary,
         created_at=latest_result.created_at,
         updated_at=latest_result.updated_at,
         locked_at=latest_result.locked_at,
+        skill_name=latest_result.skill_name,
+        config_version_id=latest_result.config_version_id,
     )
+    current_result.skill_name = skill.name
+    current_result.config_version_id = snapshot["config_version_id"]
     current_result.result_payload = {
         **dict(current_result.result_payload),
         "skill_name": skill.name,
@@ -1487,6 +2280,8 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             "decision": persisted_decision,
         },
     }
+    if tool_skips:
+        current_result.result_payload["tool_skips"] = tool_skips
     if skill.name == "scenario_risk_skill":
         fallback_summary = _build_stage_one_summary(
             goal=goal,
@@ -1513,6 +2308,43 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             "issues": llm_synthesis_issues,
         }
         current_result.result_payload["scenario_summary"] = scenario_summary
+        # ``langgraph-v1`` pauses before its decision node so a deterministic
+        # Stage 1 summary can be checked here.  A high-risk/boundary result
+        # must remain resumable and cannot fall through to Run completion.
+        # HCR-P0-04: the L3/boundary human-review rule is a named contract
+        # function in ``stage1_contract`` and is decoupled from the
+        # ``enable_hitl`` checkpoint flag (it takes no such parameter), so
+        # an L3/boundary result forces ``requires_human=True`` even when no
+        # durable checkpoint was taken.
+        stage1_requires_human = stage1_requires_human_review(
+            risk_level=scenario_summary.get("risk_level"),
+            boundary_flag=scenario_summary.get("boundary_flag", False),
+        )
+        if checkpoint_payload:
+            persisted_decision["should_continue"] = True
+            persisted_decision["requires_human"] = stage1_requires_human
+            persisted_decision["source"] = "stage1_hitl_gate"
+            persisted_decision["summary"] = (
+                "阶段一 L3 或风险边界结果需要人工确认。"
+                if stage1_requires_human
+                else "阶段一结果通过自动风险门控。"
+            )
+            persisted_decision["checkpoint"] = checkpoint_payload
+            run.harness_checkpoint_status = "paused" if stage1_requires_human else "not_required"
+            if not stage1_requires_human:
+                # A Stage 1 checkpoint is created before we can evaluate risk.
+                # It is not a resumable pause for a low-risk result, so
+                # release it before returning a completed Run.
+                from src.apps.api.app.agents.harness.runner import discard_hitl_checkpoint
+
+                discard_hitl_checkpoint(run.harness_thread_id)
+                run.harness_thread_id = None
+                persisted_decision.pop("checkpoint", None)
+        elif stage1_requires_human:
+            persisted_decision["requires_human"] = True
+            persisted_decision["should_continue"] = True
+            persisted_decision["source"] = "stage1_hitl_gate"
+            persisted_decision["summary"] = "阶段一 L3 或风险边界结果需要人工确认。"
         # Run validation separately and attach under stage1_validation
         validation_issues = validate_stage1_summary(scenario_summary)
         quality_scores = compute_stage1_quality(scenario_summary)
@@ -1520,11 +2352,30 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             "issues": validation_issues,
             "quality": quality_scores,
         }
+        # F1/F2/F3 三段推进事件：把阶段一的聚合执行拆为「场景边界 →
+        # 流程责任链 → 风险与HITL」三步可见推进，供前端时间线分组展示。
+        # 事件只携带本段产物摘要，不重复 RunEvent 已留痕的工具调用明细。
+        _emit_stage1_phase_events(
+            run=run,
+            skill_name=skill.name,
+            config_version_id=run.config_version_id,
+            scenario_summary=scenario_summary,
+            quality=quality_scores,
+            validation_issues=validation_issues,
+        )
         # Record input binding
         current_result.result_payload["input_binding"] = {
-            "mode": "project_evidence_fallback",
+            "mode": "project_related_evidence_only",
             "file_ids": list(set(f for item in evidence_items for f in ([item.source_file_id] if item.source_file_id else []))),
             "evidence_ids": evidence_refs,
+            "excluded_evidence": [
+                {
+                    "id": item.id,
+                    "relevance_status": item.relevance_status,
+                    "reasons": list(item.relevance_reasons),
+                }
+                for item in excluded_evidence
+            ],
         }
 
     if skill.name == "value_modeling_skill":
@@ -1587,6 +2438,18 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
     current_result.updated_at = utcnow()
     current_result.skill_versions[skill.name] = skill_version
     current_result.evidence_item_ids = evidence_refs
+    current_result.input_file_ids = list(dict.fromkeys(
+        item.source_file_id for item in evidence_items if item.source_file_id
+    ))
+    current_result.valid_result = (
+        bool(persisted_decision.get("should_continue", False))
+        and not bool(persisted_decision.get("requires_human", False))
+        and not tool_failures
+    )
+    current_result.invalid_reason = (
+        None if current_result.valid_result
+        else ("awaiting_human_confirmation" if persisted_decision.get("requires_human") else "harness_decision_not_accepted")
+    )
     save_stage_result(current_result)
 
     report = None
@@ -1641,6 +2504,7 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         "run.skill_completed",
         {
             "skill_name": skill.name,
+            "config_version_id": run.config_version_id,
             "summary": "Fixed skill invocation completed.",
             "source": "skill.invoke",
             "stage_result_id": current_result.id,
@@ -1661,5 +2525,11 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
         "stage_result_id": current_result.id,
         "report_id": report.id if report is not None else None,
         "tool_results": tool_results,
+        "tool_failures": tool_failures,
+        "decision": persisted_decision,
+        "execution_status": (
+            "waiting_user" if persisted_decision.get("requires_human")
+            else ("completed" if current_result.valid_result else "failed")
+        ),
         "warnings": warnings,
     }

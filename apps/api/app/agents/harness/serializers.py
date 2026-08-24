@@ -25,5 +25,6 @@ def serialize_harness_payload(state: HarnessState) -> dict[str, Any]:
         "plan": dict(state.get("plan", {})),
         "decision": dict(state.get("decision", {})),
         "llm_status": dict(state.get("llm_status", {})),
+        "subagent_audits": [dict(item) for item in state.get("subagent_audits", [])],
         "traces": list(state.get("traces", [])),
     }

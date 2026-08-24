@@ -35,6 +35,10 @@ class LangGraphV1HarnessProvider:
             allowed_tools=list(request.allowed_tools),
             allowed_subagents=list(request.allowed_subagents),
         )
+        config = self._config
+        enable_hitl = bool(request.options.get("enable_hitl", False))
+        if enable_hitl and config is None:
+            config = HarnessConfig(enable_hitl=True)
         result = run_skill_harness(
             skill=skill,
             goal=request.goal,
@@ -46,7 +50,7 @@ class LangGraphV1HarnessProvider:
             previous_stage_result=request.previous_stage_result,
             llm_client=llm_client,
             tool_invoker=tool_invoker,
-            config=self._config,
+            config=config,
             auto_run_condition=str(request.options.get("auto_run_condition", "")) or None,
             context={
                 "project_id": request.project_id,
@@ -54,9 +58,25 @@ class LangGraphV1HarnessProvider:
                 "run_id": request.run_id,
                 "config_version_id": request.config_version_id,
                 "skill_version": request.skill_version,
+                "primary_skill": request.primary_skill,
+                "enabled_skills": list(request.enabled_skills),
                 "enabled_subagents": list(request.enabled_subagents),
+                "thread_id": request.options.get("harness_thread_id") or f"thread-{request.run_id}",
+                "permission_adapter": request.options.get("permission_adapter"),
+                "tool_adapter": request.options.get("tool_adapter"),
             },
         )
-        state = dict(result.state)
+        checkpoint: dict[str, Any] = {}
+        if isinstance(result, tuple):
+            execution_result, thread_id = result
+            state = dict(execution_result.state)
+            checkpoint = {
+                "thread_id": thread_id,
+                "status": "paused",
+                "provider": self.version,
+            }
+        else:
+            state = dict(result.state)
         state["harness_version"] = self.version
+        state["checkpoint"] = checkpoint
         return harness_result_from_legacy_state(state, harness_version=self.version)

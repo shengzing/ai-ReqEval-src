@@ -24,16 +24,24 @@ export function CodexLayout() {
     loading,
     error,
     toolCalls,
+    executionTrace,
     suggestions,
     skills,
     evidenceItems,
+    stageResultPayload,
+    stageVersionLog,
+    stageLockCheck,
+    setStageResultPayload,
     currentConversation,
     currentConversationError,
     currentConversationLoading,
     currentRunId,
     currentRunStatus,
+    currentRunCheckpointStatus,
+    runEvidenceFilter,
     reloadProjects,
     hydrateStageContext,
+    loadStageDeferredContext,
     createEmptyProject,
     startTask,
     lockCurrentStage,
@@ -41,6 +49,7 @@ export function CodexLayout() {
     confirmSuggestion,
     createEvidenceSuggestion,
     parseEvidenceFile,
+    reviewEvidenceFileRelevance,
     uploadEvidenceFiles,
     visionParseEvidenceFile,
     generateProjectReport,
@@ -70,7 +79,6 @@ export function CodexLayout() {
     highlightEvidenceName,
     setHighlightEvidenceName,
   } = useWorkspaceSelection()
-  const [stageResultPayload, setStageResultPayload] = useState<Record<string, unknown> | undefined>()
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsDirty, setSettingsDirty] = useState(false)
@@ -129,14 +137,13 @@ export function CodexLayout() {
 
   useEffect(() => {
     if (!activeProject || !activeStage) return
-    // Immediately clear stale payload so the new stage doesn't briefly
-    // render the previous stage's resultPayload before hydrateStageContext
-    // resolves.
-    setStageResultPayload(undefined)
-    void hydrateStageContext(activeProject, activeStage).then((context) => {
-      setStageResultPayload(context.stage.resultPayload)
-    })
+    void hydrateStageContext(activeProject, activeStage)
   }, [activeProject, activeStage, hydrateStageContext])
+
+  useEffect(() => {
+    if (!rightSidebarOpen || !activeProject || !activeStage) return
+    void loadStageDeferredContext(activeProject, activeStage)
+  }, [activeProject, activeStage, loadStageDeferredContext, rightSidebarOpen])
 
   const currentProject = getProject(activeProject)
   const currentStage = getStage(activeProject, activeStage)
@@ -312,11 +319,16 @@ export function CodexLayout() {
             currentConversationLoading={currentConversationLoading}
             currentRunId={currentRunId}
             toolCalls={toolCalls}
+            executionTrace={executionTrace}
             suggestions={suggestions}
             skills={skills}
             evidenceItems={evidenceItems}
             currentRunStatus={currentRunStatus}
+            currentRunCheckpointStatus={currentRunCheckpointStatus}
+            runEvidenceFilter={runEvidenceFilter}
             stageResultPayload={stageResultPayload}
+            stageVersionLog={stageVersionLog}
+            stageLockCheck={stageLockCheck}
             rightSidebarOpen={rightSidebarOpen}
             highlightEvidenceName={highlightEvidenceName}
             onSetActiveProject={setActiveProject}
@@ -338,6 +350,7 @@ export function CodexLayout() {
               return result
             }}
             onParseEvidenceFile={parseEvidenceFile}
+            onReviewEvidenceFileRelevance={reviewEvidenceFileRelevance}
             onVisionParseEvidenceFile={visionParseEvidenceFile}
             onGenerateReport={generateProjectReport}
             onLoadReportContent={loadProjectReportContent}

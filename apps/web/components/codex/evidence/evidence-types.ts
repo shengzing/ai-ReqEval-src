@@ -30,6 +30,10 @@ export const typeIcons = {
   report: FileOutput,
 }
 
+export function isImageEvidence(item: EvidenceItem) {
+  return item.type === 'file' && /\.(png|jpe?g|webp|gif|bmp|tiff?|heic)$/i.test(item.name)
+}
+
 export function canVisionParseEvidence(item: EvidenceItem) {
   const name = item.name.toLowerCase()
   return item.type === 'file' && /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|pdf)$/i.test(name)

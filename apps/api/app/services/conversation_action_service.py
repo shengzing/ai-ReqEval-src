@@ -7,7 +7,12 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 
-from src.apps.api.app.domain.models import ConversationActionProposalRecord, Run, utcnow
+from src.apps.api.app.domain.models import (
+    ConversationActionProposalRecord,
+    ConversationHumanConfirmation,
+    Run,
+    utcnow,
+)
 from src.apps.api.app.repositories import store
 from src.apps.api.app.services import log_service, run_service
 
@@ -51,14 +56,20 @@ def save_action_proposals(
     return records
 
 
-def confirm_action_proposal(proposal_id: str, *, conversation_id: Optional[str] = None) -> tuple[ConversationActionProposalRecord, Run]:
+def confirm_action_proposal(
+    proposal_id: str, *, conversation_id: Optional[str] = None
+) -> tuple[ConversationActionProposalRecord, Run | None]:
     proposal = _get_pending_proposal(proposal_id)
     if conversation_id is not None and proposal.conversation_id != conversation_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Action proposal does not belong to this conversation",
         )
-    if proposal.action_type != "propose_create_run":
+    if proposal.action_type not in {
+        "propose_create_run",
+        "propose_invoke_skill",
+        "propose_request_human_confirmation",
+    }:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unsupported action proposal: {proposal.action_type}",
@@ -73,20 +84,44 @@ def confirm_action_proposal(proposal_id: str, *, conversation_id: Optional[str] 
             detail="Conversation action proposal is no longer pending",
         )
     try:
-        run = run_service.create_run_sync(
-            project_id=proposal.project_id,
-            stage_id=proposal.stage_id,
-            conversation_id=proposal.conversation_id,
-            goal=str(proposal.payload.get("goal") or proposal.title),
-            config_version_id=proposal.payload.get("config_version_id"),
-        )
+        run: Run | None = None
+        if proposal.action_type in {"propose_create_run", "propose_invoke_skill"}:
+            run_kwargs = {
+                "project_id": proposal.project_id,
+                "stage_id": proposal.stage_id,
+                "conversation_id": proposal.conversation_id,
+                "goal": str(proposal.payload.get("goal") or proposal.title),
+                "config_version_id": proposal.payload.get("config_version_id"),
+            }
+            if proposal.action_type == "propose_invoke_skill":
+                run_kwargs["requested_skill_name"] = proposal.payload.get("skill_name")
+            run = run_service.create_run_sync(
+                **run_kwargs,
+            )
+        else:
+            question = str(proposal.payload.get("question") or "").strip()
+            if not question:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Human confirmation proposal is missing a question",
+                )
+            confirmation = ConversationHumanConfirmation(
+                id=f"chc-{uuid4().hex}",
+                project_id=proposal.project_id,
+                stage_id=proposal.stage_id,
+                conversation_id=proposal.conversation_id,
+                proposal_id=proposal.id,
+                question=question,
+            )
+            store.save_conversation_human_confirmation(confirmation)
+            proposal.confirmation_id = confirmation.id
     except Exception:
-        # create_run_sync failed; release the claim so the proposal can be
-        # retried instead of being stuck as accepted with no run.
+        # The outer action failed; release the claim so the proposal can be
+        # retried instead of being stuck in the accepting state.
         store.release_conversation_action_proposal(proposal_id)
         raise
     proposal.status = "accepted"
-    proposal.run_id = run.id
+    proposal.run_id = run.id if run else None
     proposal.updated_at = utcnow()
     store.save_conversation_action_proposal(proposal)
     log_service.create_execution_log(
@@ -94,11 +129,12 @@ def confirm_action_proposal(proposal_id: str, *, conversation_id: Optional[str] 
         action="conversation_action_proposal.accepted",
         resource_type="conversation_action_proposal",
         resource_id=proposal.id,
-        run_id=run.id,
+        run_id=run.id if run else None,
         details={
             "conversation_id": proposal.conversation_id,
             "stage_id": proposal.stage_id,
             "action_type": proposal.action_type,
+            "confirmation_id": proposal.confirmation_id,
         },
     )
     return proposal, run

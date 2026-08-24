@@ -300,6 +300,7 @@ def _stage_default_profile(stage: Stage) -> StageSkillProfile:
         primary_skill=skill.name,
         enabled_tools=list(skill.allowed_tools),
         enabled_subagents=list(skill.allowed_subagents),
+        enabled_skills=[skill.name],
         auto_run_condition="manual",
         harness_version=DEFAULT_AGENT_HARNESS_VERSION,
         conversation_harness_version=DEFAULT_CONVERSATION_HARNESS_VERSION,
@@ -380,6 +381,7 @@ def _stage_skill_to_dict(profile: StageSkillProfile) -> dict[str, Any]:
         "primary_skill": profile.primary_skill,
         "enabled_tools": sorted(profile.enabled_tools),
         "enabled_subagents": sorted(profile.enabled_subagents),
+        "enabled_skills": list(profile.enabled_skills),
         "auto_run_condition": profile.auto_run_condition,
         "harness_version": profile.harness_version,
         "conversation_harness_version": profile.conversation_harness_version,
@@ -472,20 +474,41 @@ def _validate_stage_skill_profiles(
             raise SettingsValidationError(f"Unknown stage_id: {profile.stage_id}")
         if profile.primary_skill not in known_skill_names:
             raise SettingsValidationError(f"Unknown primary skill: {profile.primary_skill}")
-        skill = get_skill_by_name(profile.primary_skill)
-        illegal_tools = sorted(set(profile.enabled_tools) - set(skill.allowed_tools))
+        # enabled_skills may carry zero, one, or multiple skill names. An
+        # empty list is allowed (stage harness handles the "no skill enabled"
+        # case); names must still be known and are de-duplicated preserving
+        # order. Falls back to ``[primary_skill]`` in filter_tools_for_skill.
+        enabled_skills = list(dict.fromkeys(profile.enabled_skills))
+        unknown_enabled = sorted(set(enabled_skills) - known_skill_names)
+        if unknown_enabled:
+            raise SettingsValidationError(
+                f"Unknown enabled_skills: {unknown_enabled}"
+            )
+        profile.enabled_skills = enabled_skills
+        active_skill_names = enabled_skills or [profile.primary_skill]
+        active_definitions = [get_skill_by_name(name) for name in active_skill_names]
+        allowed_tools = {
+            tool for definition in active_definitions for tool in definition.allowed_tools
+        }
+        allowed_subagents = {
+            subagent for definition in active_definitions for subagent in definition.allowed_subagents
+        }
+        illegal_tools = sorted(set(profile.enabled_tools) - allowed_tools)
         if illegal_tools:
             raise SettingsValidationError(
-                f"enabled_tools must be a subset of {skill.name}.allowed_tools, illegal: {illegal_tools}"
+                f"enabled_tools must be a subset of enabled Skills' allowed tools, illegal: {illegal_tools}"
             )
-        illegal_subagents = sorted(set(profile.enabled_subagents) - set(skill.allowed_subagents))
+        illegal_subagents = sorted(set(profile.enabled_subagents) - allowed_subagents)
         if illegal_subagents:
             raise SettingsValidationError(
-                f"enabled_subagents must be a subset of {skill.name}.allowed_subagents, illegal: {illegal_subagents}"
+                f"enabled_subagents must be a subset of enabled Skills' allowed subagents, illegal: {illegal_subagents}"
             )
-        if profile.auto_run_condition not in {"manual", "on_inputs_ready", "auto"}:
+        # auto_run_condition 已固化为 "manual"：阶段执行仅人工触发（点运行按钮/对话发起）。
+        # AutoResearch 能力提升轨道走独立 API（/autoresearch/*），不在此驱动。保留该字段
+        # 仅为兼容历史配置快照与审计记录；非 manual 值一律拒绝，避免旧数据/误传。
+        if profile.auto_run_condition not in {"manual"}:
             raise SettingsValidationError(
-                f"Invalid auto_run_condition: {profile.auto_run_condition}"
+                f"Invalid auto_run_condition: {profile.auto_run_condition}; only 'manual' is accepted"
             )
         from src.apps.api.app.agents.harness.registry import list_harness_versions
         from src.apps.api.app.agents.conversation_harness.registry import list_conversation_harness_versions
@@ -1095,7 +1118,12 @@ def filter_tools_for_skill(
         config_version_id=config_version_id,
     )
     for profile in settings.stage_skill_profiles:
-        if profile.stage_id == stage_id and profile.primary_skill == skill_name:
+        # Match the running skill against the operator's enabled set. An empty
+        # enabled_skills list (legacy or "all disabled" draft) falls back to
+        # ``[primary_skill]`` so old snapshots keep working and a stage with
+        # every skill disabled still resolves to its primary skill's tools.
+        active_skills = profile.enabled_skills or [profile.primary_skill]
+        if profile.stage_id == stage_id and skill_name in active_skills:
             declared_tool_set = set(declared_tools)
             declared_subagent_set = set(declared_subagents)
             enabled_tools = [tool for tool in profile.enabled_tools if tool in declared_tool_set]

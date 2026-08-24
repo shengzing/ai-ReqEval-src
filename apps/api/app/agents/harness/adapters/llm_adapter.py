@@ -21,6 +21,11 @@ class LLMAdapter:
     def is_configured(self) -> bool:
         return self._client.is_configured()
 
+    @property
+    def client(self) -> HarnessLLMClient:
+        """Expose the scoped client for project tools that opt into LLM input."""
+        return self._client
+
     def status(self, *, mode: str | None = None, message: str | None = None) -> dict[str, Any]:
         return self._client.status(mode=mode, message=message)
 

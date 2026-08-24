@@ -1,6 +1,7 @@
 'use client'
 
-import { AlertCircle, FileText, ImageIcon, Loader2, Maximize2, X } from 'lucide-react'
+import { AlertCircle, FileText, GripVertical, ImageIcon, Loader2, Maximize2, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -15,6 +16,10 @@ interface RawResourcePreviewSidebarProps {
   onClose: () => void
 }
 
+const MIN_PREVIEW_WIDTH = 320
+const MAX_PREVIEW_WIDTH = 800
+const DEFAULT_PREVIEW_WIDTH = 420
+
 export function RawResourcePreviewSidebar({
   item,
   preview,
@@ -22,10 +27,111 @@ export function RawResourcePreviewSidebar({
   error,
   onClose,
 }: RawResourcePreviewSidebarProps) {
+  const [width, setWidth] = useState(DEFAULT_PREVIEW_WIDTH)
+  const [isResizing, setIsResizing] = useState(false)
+  const asideRef = useRef<HTMLElement>(null)
+  const widthRef = useRef(width)
+  widthRef.current = width
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('ai-reqeval:preview-sidebar-width')
+      if (stored) {
+        const parsed = Number(stored)
+        if (Number.isFinite(parsed)) {
+          setWidth(Math.min(MAX_PREVIEW_WIDTH, Math.max(MIN_PREVIEW_WIDTH, parsed)))
+        }
+      }
+    } catch {
+      // 忽略存储不可用的情况
+    }
+  }, [])
+
+  // 组件卸载时恢复全局 cursor / userSelect，避免拖拽中卸载残留样式
+  useEffect(() => {
+    return () => {
+      if (isResizing) {
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+  }, [isResizing])
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !asideRef.current) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    setIsResizing(true)
+  }
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isResizing || !asideRef.current) return
+    const asideRect = asideRef.current.getBoundingClientRect()
+    const newWidth = asideRect.right - event.clientX
+    const clamped = Math.min(MAX_PREVIEW_WIDTH, Math.max(MIN_PREVIEW_WIDTH, newWidth))
+    setWidth(clamped)
+  }
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isResizing) return
+    event.currentTarget.releasePointerCapture(event.pointerId)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    setIsResizing(false)
+    try {
+      window.localStorage.setItem('ai-reqeval:preview-sidebar-width', String(widthRef.current))
+    } catch {
+      // 忽略存储不可用的情况
+    }
+  }
+
+  const resetWidth = () => {
+    setWidth(DEFAULT_PREVIEW_WIDTH)
+    try {
+      window.localStorage.setItem('ai-reqeval:preview-sidebar-width', String(DEFAULT_PREVIEW_WIDTH))
+    } catch {
+      // 忽略存储不可用的情况
+    }
+  }
+
   if (!item && !loading && !error) return null
 
   return (
-    <aside className="flex h-[42vh] w-full shrink-0 flex-col border-t border-border bg-background lg:h-full lg:w-[420px] lg:border-l lg:border-t-0">
+    <aside
+      ref={asideRef}
+      style={{ width: `${width}px` }}
+      className="relative flex h-[42vh] w-full shrink-0 flex-col border-t border-border bg-background lg:h-full lg:border-l lg:border-t-0"
+    >
+      {/* 拖拽手柄 */}
+      <div
+        role="separator"
+        aria-label="调整预览面板宽度"
+        aria-orientation="vertical"
+        aria-valuemin={MIN_PREVIEW_WIDTH}
+        aria-valuemax={MAX_PREVIEW_WIDTH}
+        aria-valuenow={width}
+        tabIndex={0}
+        title="拖动调整宽度，双击恢复默认"
+        onDoubleClick={resetWidth}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        className={cn(
+          'group absolute inset-y-0 -left-1 z-20 hidden w-2 touch-none cursor-col-resize items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:flex',
+          isResizing && 'bg-primary/10',
+        )}
+      >
+        <span className={cn(
+          'flex h-10 w-3 items-center justify-center rounded-full border border-border bg-card text-muted-foreground opacity-60 shadow-sm transition group-hover:opacity-100 group-focus-visible:opacity-100',
+          isResizing && 'border-primary bg-primary text-primary-foreground opacity-100',
+        )}>
+          <GripVertical className="size-3" />
+        </span>
+      </div>
+
       <div className="flex min-h-14 items-center gap-3 border-b border-border px-4">
         <PreviewIcon preview={preview} loading={loading} error={error} />
         <div className="min-w-0 flex-1">

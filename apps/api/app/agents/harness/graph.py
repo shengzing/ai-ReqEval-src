@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.apps.api.app.agents.harness.llm import HarnessLLMClient
+from src.apps.api.app.agents.harness.contracts import (
+    SubagentAuditRecord,
+    collect_subagent_evidence_refs,
+    summarize_subagent_input,
+    summarize_subagent_output,
+)
 from src.apps.api.app.agents.harness.serializers import append_trace
 from src.apps.api.app.agents.harness.state import GRAPH_VERSION, HarnessState, NO_LLM_FALLBACK_MESSAGE
 from src.apps.api.app.agents.harness.tool_nodes import ToolInvoker, run_tool_node
@@ -92,6 +101,9 @@ def build_skill_graph(
             "tool_results": dict(state.get("tool_results", {})),
             "tool_result_items": list(state.get("tool_result_items", [])),
             "tool_failures": list(state.get("tool_failures", [])),
+            "tool_skips": list(state.get("tool_skips", [])),
+            "subagent_results": list(state.get("subagent_results", [])),
+            "subagent_audits": list(state.get("subagent_audits", [])),
             "traces": list(state.get("traces", [])),
         }
         return append_trace(
@@ -173,7 +185,16 @@ def build_skill_graph(
         return next_state
 
     def run_subagents(state: HarnessState) -> HarnessState:
-        """Execute enabled subagents with the current tool results."""
+        """Execute enabled subagents with the current tool results.
+
+        Sub-agent invocation is audited via ``SubagentAuditRecord``
+        (``contracts.py``), a schema deliberately separate from the tool
+        audit dict produced by ``ToolAdapter.invoke`` — sub-agents carry
+        ``adoption_status`` / ``review_status`` which have no tool analogue.
+        Standardizing these records into
+        ``StageResult.result_payload.harness`` is tracked by HCR-P2-01 and is
+        out of scope for the unified-tool-executor work (HCR-P1-01).
+        """
         from src.apps.api.app.agents.deepagent.subagents import invoke_subagent
 
         enabled = state.get("enabled_subagents", [])
@@ -181,26 +202,85 @@ def build_skill_graph(
             return append_trace(state, "subagents.skipped", {"reason": "no_subagents_enabled"})
 
         subagent_results: list[dict[str, Any]] = []
+        subagent_audits: list[dict[str, Any]] = []
         for name in enabled:
-            result = invoke_subagent(
-                name,
+            invocation_id = f"subagent-{uuid4().hex[:12]}"
+            started = perf_counter()
+            input_summary = summarize_subagent_input(
                 goal=state.get("goal", ""),
                 stage_name=state.get("stage_name", ""),
                 tool_results=state.get("tool_results", {}),
                 previous_stage_result=state.get("previous_stage_result"),
-                llm_client=llm_client,
             )
-            # Convert dataclass to dict for serialization
-            from dataclasses import asdict
-            subagent_results.append(asdict(result))
+            evidence_refs = collect_subagent_evidence_refs(state.get("tool_results", {}))
+            try:
+                result = invoke_subagent(
+                    name,
+                    goal=state.get("goal", ""),
+                    stage_name=state.get("stage_name", ""),
+                    tool_results=state.get("tool_results", {}),
+                    previous_stage_result=state.get("previous_stage_result"),
+                    llm_client=llm_client,
+                )
+                result_payload = asdict(result)
+                subagent_results.append(result_payload)
+                subagent_audits.append(
+                    SubagentAuditRecord(
+                        subagent_name=name,
+                        invocation_id=invocation_id,
+                        status="completed",
+                        input_summary=input_summary,
+                        output_summary=summarize_subagent_output(result_payload),
+                        duration_ms=round((perf_counter() - started) * 1000, 3),
+                        evidence_refs=evidence_refs,
+                        review_status=result.review_status,
+                        adoption_status="not_adopted",
+                        adoption_reason="子代理输出作为独立复核意见保留，当前阶段结论合成未自动采纳。",
+                        provider="langgraph-v1",
+                    ).to_dict()
+                )
+            except Exception as exc:  # noqa: BLE001 - failure must become an audit record
+                subagent_audits.append(
+                    SubagentAuditRecord(
+                        subagent_name=name,
+                        invocation_id=invocation_id,
+                        status="failed",
+                        input_summary=input_summary,
+                        failure={"code": "subagent_execution_failed", "detail": str(exc)[:500]},
+                        duration_ms=round((perf_counter() - started) * 1000, 3),
+                        evidence_refs=evidence_refs,
+                        review_status="fail",
+                        adoption_status="not_adopted",
+                        adoption_reason="子代理执行失败，未进入阶段结论。",
+                        provider="langgraph-v1",
+                    ).to_dict()
+                )
 
         return append_trace(
-            {**state, "subagent_results": subagent_results},
+            {**state, "subagent_results": subagent_results, "subagent_audits": subagent_audits},
             "subagents.completed",
-            {"count": len(subagent_results), "names": enabled},
+            {
+                "count": len(subagent_audits),
+                "completed_count": sum(item["status"] == "completed" for item in subagent_audits),
+                "failed_count": sum(item["status"] == "failed" for item in subagent_audits),
+                "names": enabled,
+            },
         )
 
     def synthesize_result(state: HarnessState) -> HarnessState:
+        if state.get("tool_skips") and not state.get("tool_results"):
+            return append_trace(
+                {
+                    **state,
+                    "synthesized_payload": {
+                        "source": "skipped_missing_input",
+                        "tool_count": 0,
+                        "formal_result": False,
+                    },
+                },
+                "result.skipped",
+                {"reason": "no_completed_tools", "skipped_tool_count": len(state.get("tool_skips", []))},
+            )
         synthesized_payload: dict[str, Any] = {"source": "tool_results", "tool_count": len(state.get("tool_results", {}))}
         if state.get("skill_name") == "scenario_risk_skill":
             try:
@@ -301,10 +381,14 @@ def build_skill_graph(
 
     def validate_contract(state: HarnessState) -> HarnessState:
         failures = list(state.get("tool_failures", []))
+        skips = list(state.get("tool_skips", []))
+        no_completed_tools = bool(skips) and not bool(state.get("tool_results"))
         requires_human = bool(failures)
         issues: list[dict[str, Any]] = [
             {"code": "tool_failed", "detail": item.get("detail", "")} for item in failures
         ]
+        if no_completed_tools:
+            issues.append({"code": "missing_input", "detail": "No tool completed because required input is unavailable."})
         # Validate the current run's synthesized summary, not an input from a
         # prior stage. This makes the graph decision reflect what it produced.
         # scenario_summary contract. This populates validation_issues with
@@ -342,6 +426,7 @@ def build_skill_graph(
                             "validation_issues": issues,
                             "quality_scores": quality,
                             "requires_human": requires_human,
+                            "input_gate_blocked": no_completed_tools,
                         },
                         "contract.validated",
                         {
@@ -360,6 +445,7 @@ def build_skill_graph(
                 **state,
                 "validation_issues": issues,
                 "requires_human": requires_human,
+                "input_gate_blocked": no_completed_tools,
             },
             "contract.validated",
             {"requires_human": requires_human, "issue_count": len(issues)},
@@ -367,6 +453,7 @@ def build_skill_graph(
 
     def maybe_interrupt(state: HarnessState) -> HarnessState:
         failures = list(state.get("tool_failures", []))
+        no_completed_tools = bool(state.get("tool_skips")) and not bool(state.get("tool_results"))
         # ── 3D alignment check — if a binding decision exists and is
         # defer/reject, escalate to human review (overrides the default
         # tool-failure-only check). ──
@@ -416,8 +503,10 @@ def build_skill_graph(
         requires_human = bool(state.get("requires_human", False)) or alignment_requires_human
         human_input = state.get("human_input") or {}
         human_approved = human_input.get("approved") if isinstance(human_input, dict) else None
-        should_continue = not failures and alignment.get("decision") != "reject"
+        should_continue = not failures and not no_completed_tools and alignment.get("decision") != "reject"
         notes = [f"{len(failures)} tool failure(s)."] if failures else []
+        if no_completed_tools:
+            notes.append("No completed tools: required input is unavailable.")
         if alignment_summary and alignment.get("decision") != "insufficient":
             notes.append("3D对齐: {0}".format(alignment_summary))
         if human_approved is not None:
@@ -427,7 +516,11 @@ def build_skill_graph(
         decision = {
             "should_continue": should_continue,
             "requires_human": requires_human,
-            "summary": alignment_summary or ("Fallback decision: completed enabled tools." if not failures else "Fallback decision: tool failures require review."),
+            "summary": alignment_summary or (
+                "Fallback decision: input is unavailable."
+                if no_completed_tools
+                else ("Fallback decision: completed enabled tools." if not failures else "Fallback decision: tool failures require review.")
+            ),
             "confidence": confidence,
             "notes": notes,
             "source": "human" if human_approved is not None else ("validator" if state.get("requires_human") else state.get("plan", {}).get("source", "fallback")),
@@ -439,16 +532,17 @@ def build_skill_graph(
         return append_trace(next_state, "harness.decision", decision)
 
     def _should_refine(state: HarnessState) -> str:
-        """Conditional edge: decide whether to refine the Stage 1 result or proceed to autoresearch.
+        """Conditional edge: decide whether to refine the Stage 1 result or end.
 
         Returns "refine_stage1" if the scenario_summary can be automatically improved
         within the configured iteration budget and the case is not blocked by HITL gates.
-        Returns "autoresearch" otherwise.
+        Returns END otherwise — the harness no longer auto-triggers AutoResearch
+        inline; AutoResearch runs as an independent track via its own API.
         """
         iteration = int(state.get("refinement_iteration", 0) or 0)
         max_iter = int(state.get("max_refinement_iterations", 2) or 2)
         if iteration >= max_iter:
-            return "autoresearch"
+            return END
 
         # Check scenario_summary from synthesized_payload (or previous_stage_result fallback)
         prev = state.get("previous_stage_result") or {}
@@ -464,15 +558,15 @@ def build_skill_graph(
             scenario_summary.get("risk_confidence", {}) if isinstance(scenario_summary, dict) else {}
         )
         if risk_level == "L3":
-            return "autoresearch"
+            return END
         if boundary_flag:
-            return "autoresearch"
+            return END
         if (
             risk_level != "L3"
             and isinstance(risk_confidence, dict)
             and float(risk_confidence.get("L3", 0.0) or 0.0) >= 0.5
         ):
-            return "autoresearch"
+            return END
 
         # Only refine if there are still high-severity issues with suggested patches
         issues = state.get("validation_issues", []) or []
@@ -481,7 +575,7 @@ def build_skill_graph(
             if i.get("severity") == "high" and i.get("suggested_patch")
         ]
         if not patchable_high:
-            return "autoresearch"
+            return END
 
         return "refine_stage1"
 
@@ -792,68 +886,19 @@ def build_skill_graph(
     graph.add_edge("synthesize_result", "validate_contract")
     graph.add_edge("validate_contract", "maybe_interrupt")
 
-    # --- AutoResearch node ---------------------------------------------------
-    def autoresearch(state: HarnessState) -> HarnessState:
-        """Generate an AutoResearch record if auto_run_condition permits."""
-        condition = state.get("auto_run_condition", "manual")
-        if condition == "manual":
-            return append_trace(state, "autoresearch.skipped", {"reason": "manual_mode"})
-
-        # Only proceed if there are evidence items (for on_inputs_ready)
-        if condition == "on_inputs_ready" and not state.get("evidence_items"):
-            return append_trace(state, "autoresearch.skipped", {"reason": "no_inputs_ready"})
-
-        # Extract risk context from previous_stage_result for trace logging
-        prev = state.get("previous_stage_result") or {}
-        scenario_summary = prev.get("scenario_summary", {}) if isinstance(prev, dict) else {}
-        risk_level_trace = scenario_summary.get("risk_level", "")
-        boundary_flag_trace = scenario_summary.get("boundary_flag", False)
-
-        record_ids: list[str] = list(state.get("autoresearch_record_ids", []))
-        try:
-            from src.apps.api.app.services.autoresearch_service import create_autoresearch_record
-
-            stage_id = str(state.get("stage_id", ""))
-            run_id = str(state.get("run_id", ""))
-            if stage_id and run_id:
-                record = create_autoresearch_record(stage_id=stage_id, run_id=run_id, auto_run_condition=condition)
-                record_ids.append(record.id)
-                gate_blocked = record.context.get("autoresearch_gate_blocked", False)
-                gate_reason = record.context.get("autoresearch_gate_reason", "")
-                trace_data: dict[str, Any] = {
-                    "record_id": record.id,
-                    "condition": condition,
-                    "risk_level": risk_level_trace,
-                    "boundary_flag": boundary_flag_trace,
-                }
-                if gate_blocked:
-                    trace_data["gate_blocked"] = True
-                    trace_data["gate_reason"] = gate_reason
-                return append_trace(
-                    {**state, "autoresearch_record_ids": record_ids},
-                    "autoresearch.generated",
-                    trace_data,
-                )
-        except Exception as exc:
-            # Don't fail the run if autoresearch has an issue
-            return append_trace(state, "autoresearch.failed", {"error": str(exc)})
-
-        return state
-
-    # Rewire: maybe_interrupt -> _should_refine (conditional) -> refine_stage1 | autoresearch
-    # If refine_stage1 runs, it loops back to validate_contract → maybe_interrupt.
-    # Otherwise it proceeds to autoresearch → END.
-    graph.add_node("autoresearch", autoresearch)
+    # AutoResearch 已从 harness 解耦：不再有内联 autoresearch 节点。maybe_interrupt
+    # 之后由 _should_refine 决定是 refine_stage1 还是直接 END。AutoResearch 作为独立
+    # 能力提升轨道，只经其专属 API（/autoresearch/*）显式触发，见
+    # DOCS/design/2026-07-12-stage-harness-autoresearch-architecture.md。
     graph.add_conditional_edges(
         "maybe_interrupt",
         _should_refine,
         {
             "refine_stage1": "refine_stage1",
-            "autoresearch": "autoresearch",
+            END: END,
         },
     )
     graph.add_edge("refine_stage1", "validate_contract")
-    graph.add_edge("autoresearch", END)
 
     # Determine effective interrupt_before
     effective_interrupt = interrupt_before

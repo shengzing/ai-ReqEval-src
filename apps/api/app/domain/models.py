@@ -25,6 +25,7 @@ class ConversationMessage:
     source_event_id: Optional[str] = None  # populated when message was transcribed from a RunEvent
     run_id: Optional[str] = None  # source Run (if any)
     action_proposals: list[dict[str, Any]] = field(default_factory=list)
+    citations: list[dict[str, Any]] = field(default_factory=list)
     harness_warnings: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     # Process-only entries render execution evidence without an empty chat bubble.
@@ -91,6 +92,28 @@ class Run:
     failure_context: dict[str, Any] = field(default_factory=dict)
     events: list[RunEvent] = field(default_factory=list)
     config_version_id: Optional[str] = None
+    skill_name: Optional[str] = None
+    # HCR-P1-02 配置溯源：primary_skill/enabled_skills 来自冻结的 settings
+    # snapshot（``_configured_skill_names``），requested_skill_name 是调用方
+    # 显式请求的 Skill（可能不同于 primary），routing_source 标记是经
+    # snapshot 解析（"snapshot"）还是静态回退（"static_fallback"）。复现的
+    # 真理来源仍是 ``config_version_id``；这些字段是审计/展示的去规范化缓存。
+    primary_skill: Optional[str] = None
+    enabled_skills: Optional[list[str]] = None
+    requested_skill_name: Optional[str] = None
+    routing_source: Optional[str] = None
+    # A non-terminal run may be waiting for material or an explicit human
+    # decision.  Keep the reason on the Run so a fresh client can explain the
+    # state without reverse-engineering the event stream.
+    waiting_reason: Optional[str] = None
+    harness_thread_id: Optional[str] = None
+    harness_checkpoint_status: Optional[str] = None
+    # Client-supplied identity mirrored from the run policy. The resume route
+    # compares it against ``ResumeRunRequest.allowed_resumer`` (plain string
+    # equality) to refuse an unexpected resumer. NOTE: this is NOT a real auth
+    # principal — the project has no identity system yet. Wire real auth
+    # before relying on it for trust decisions.
+    allowed_resumer: Optional[str] = None
 
 
 @dataclass
@@ -106,11 +129,27 @@ class ConversationActionProposalRecord:
     # pending | accepting | accepted | rejected
     # - pending: created, waiting for user confirm/reject
     # - accepting: atomically claimed by a confirm caller, run creation in flight
-    # - accepted: run created, run_id set
+    # - accepted: outer action completed; run_id or confirmation_id set
     # - rejected: user declined, no run created
     status: str = "pending"
     requires_confirmation: bool = True
     run_id: Optional[str] = None
+    confirmation_id: Optional[str] = None
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class ConversationHumanConfirmation:
+    """A question raised by a conversation action, answered outside the model."""
+
+    id: str
+    project_id: str
+    stage_id: str
+    conversation_id: str
+    proposal_id: str
+    question: str
+    status: str = "pending"
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -131,6 +170,10 @@ class StageResult:
     autoresearch_record_ids: list[str] = field(default_factory=list)
     confirmation_ids: list[str] = field(default_factory=list)
     result_payload: dict[str, Any] = field(default_factory=dict)
+    # HCR-P1-02：first-class 溯源字段，与 result_payload/model_config 里的嵌套
+    # 副本并存（向后兼容旧 doc）。复现仍以 Run.config_version_id 为真理来源。
+    skill_name: Optional[str] = None
+    config_version_id: Optional[str] = None
     # L1-A: prompt runtime audit fields. prompt_hashes is the SHA-256 hex of
     # each PromptTemplate.body used for this Run, prompt_versions is the
     # per-prompt version string. Together with config_hash they let us
@@ -138,6 +181,13 @@ class StageResult:
     prompt_hashes: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
     summary: str = ""
+    # A draft can be auditable yet not usable as the latest *effective* stage
+    # result.  Empty-input and failed executions must never become lock or
+    # report candidates merely because they are the newest record.
+    valid_result: bool = True
+    invalid_reason: Optional[str] = None
+    invalidated_at: Optional[datetime] = None
+    superseded_by_run_id: Optional[str] = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     locked_at: Optional[datetime] = None
@@ -327,6 +377,18 @@ class FileArtifact:
     status: str = "uploaded"
     storage_path: Optional[str] = None
     size_bytes: int = 0
+    relevance_status: str = "pending_parse"
+    relevance_score: float = 0.0
+    relevance_reasons: list[str] = field(default_factory=list)
+    relevance_rule_version: str = ""
+    relevance_input_hash: str = ""
+    relevance_source: str = "machine"
+    relevance_review_reason: Optional[str] = None
+    relevance_reviewed_by: Optional[str] = None
+    relevance_reviewed_at: Optional[datetime] = None
+    # HCR-P1-03：人工复核前态（first-class），旧 doc 读 None。
+    relevance_previous_status: Optional[str] = None
+    security_rejected: bool = False
     created_at: datetime = field(default_factory=utcnow)
 
 
@@ -341,6 +403,17 @@ class EvidenceItem:
     snippet: Optional[str] = None
     status: str = "parsed"
     review_note: Optional[str] = None
+    relevance_status: str = "pending_parse"
+    relevance_score: float = 0.0
+    relevance_reasons: list[str] = field(default_factory=list)
+    relevance_rule_version: str = ""
+    relevance_input_hash: str = ""
+    relevance_source: str = "machine"
+    relevance_review_reason: Optional[str] = None
+    relevance_reviewed_by: Optional[str] = None
+    relevance_reviewed_at: Optional[datetime] = None
+    # HCR-P1-03：人工复核前态（first-class），旧 doc 读 None。
+    relevance_previous_status: Optional[str] = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -439,10 +512,15 @@ class StageSkillProfile:
     primary_skill: str
     enabled_tools: list[str] = field(default_factory=list)
     enabled_subagents: list[str] = field(default_factory=list)
-    auto_run_condition: str = "manual"  # manual | on_inputs_ready | auto
+    auto_run_condition: str = "manual"  # 已固化为 manual：执行仅人工触发；AutoResearch 走独立 API
     harness_version: str = DEFAULT_AGENT_HARNESS_VERSION
     conversation_harness_version: str = DEFAULT_CONVERSATION_HARNESS_VERSION
     skill_versions: dict[str, str] = field(default_factory=dict)
+    # Skills the operator has explicitly enabled for this stage. A stage may
+    # enable multiple skills (their tool/subagent allowed sets union into the
+    # stage's visible surface) or none at all. Empty list falls back to
+    # ``[primary_skill]`` in ``filter_tools_for_skill`` for backward compat.
+    enabled_skills: list[str] = field(default_factory=list)
 
 
 @dataclass

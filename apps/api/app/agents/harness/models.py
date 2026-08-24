@@ -71,6 +71,7 @@ class HarnessExecutionResult:
     @property
     def steps(self) -> list[HarnessStep]:
         result_by_name = {item["name"]: item for item in self.state.get("tool_result_items", [])}
+        skip_by_name = {item["tool_name"]: item for item in self.state.get("tool_skips", [])}
         steps: list[HarnessStep] = []
         for tool_name in self.state.get("plan", {}).get("tool_names", []):
             failure = next((item for item in self.state.get("tool_failures", []) if item.get("tool_name") == tool_name), None)
@@ -91,6 +92,8 @@ class HarnessExecutionResult:
                 )
             elif failure is not None:
                 steps.append(HarnessStep(tool_name=tool_name, status="failed", error=str(failure.get("detail", "Tool failed"))))
+            elif tool_name in skip_by_name:
+                steps.append(HarnessStep(tool_name=tool_name, status="skipped", error=str(skip_by_name[tool_name].get("summary", "Tool skipped"))))
         return steps
 
     @property

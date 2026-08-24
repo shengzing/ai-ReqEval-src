@@ -28,15 +28,15 @@ class HoneycombV1HarnessProvider:
 
     def run(self, request: HarnessRequest) -> HarnessResult:
         # per-request adapter 解析；优先 request.options 注入，回退构造期注入，再回退默认
-        tool_adapter = (
-            request.options.get("tool_adapter")
-            or self._tool_adapter
-            or ToolAdapter(tool_invoker=request.options.get("tool_invoker"))
-        )
         permission_adapter = (
             request.options.get("permission_adapter")
             or self._permission_adapter
             or PermissionAdapter()
+        )
+        tool_adapter = (
+            request.options.get("tool_adapter")
+            or self._tool_adapter
+            or ToolAdapter(tool_invoker=request.options.get("tool_invoker"))
         )
         hook_adapter = (
             request.options.get("hook_adapter") or self._hook_adapter or HookAdapter()

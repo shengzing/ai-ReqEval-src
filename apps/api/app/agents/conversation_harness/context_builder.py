@@ -201,12 +201,21 @@ class ConversationContextBuilder:
         self.evidence_snippet_limit = int(run_policy.get("conversation_evidence_snippet_limit", self.evidence_snippet_limit))
         self.run_event_limit = int(run_policy.get("conversation_run_event_limit", self.run_event_limit))
 
-        stage_result = store.get_latest_stage_result(stage.id)
+        stage_result = store.get_latest_valid_stage_result(stage.id)
         evidence_items = store.list_evidence_items(project.id)
         # bound the number of evidence items; list_evidence_items returns
         # newest-first per repository ordering, so keep the most recent ones.
         truncated_evidence = evidence_items[: self.evidence_item_limit]
-        run_events = store.list_run_events_by_conversation(conversation.id)
+        # A stage conversation must see its own Run history plus stage Runs
+        # created from other conversations or directly from the Run API.
+        events_by_id = {
+            event.id: event
+            for event in [
+                *store.list_run_events_by_stage(stage.id),
+                *store.list_run_events_by_conversation(conversation.id),
+            ]
+        }
+        run_events = sorted(events_by_id.values(), key=lambda event: event.created_at)
         effective_config_version_id = snapshot.get("config_version_id") or config_version_id or ""
         prompt_templates = dict(snapshot.get("prompt_bodies", {}))
         conversation_harness_version = (

@@ -66,6 +66,7 @@ class StageSkillProfileRequest(BaseModel):
     primary_skill: str
     enabled_tools: list[str] = Field(default_factory=list)
     enabled_subagents: list[str] = Field(default_factory=list)
+    enabled_skills: list[str] = Field(default_factory=list)
     auto_run_condition: str = "manual"
     harness_version: str = DEFAULT_AGENT_HARNESS_VERSION
     conversation_harness_version: str = DEFAULT_CONVERSATION_HARNESS_VERSION
@@ -77,6 +78,7 @@ class StageSkillProfileResponse(BaseModel):
     primary_skill: str
     enabled_tools: list[str]
     enabled_subagents: list[str]
+    enabled_skills: list[str] = Field(default_factory=list)
     auto_run_condition: str
     harness_version: str = DEFAULT_AGENT_HARNESS_VERSION
     conversation_harness_version: str = DEFAULT_CONVERSATION_HARNESS_VERSION
@@ -162,6 +164,30 @@ class ModelOptionResponse(BaseModel):
 
 class ModelOptionListResponse(BaseModel):
     items: list[ModelOptionResponse]
+
+
+class ModelTestRequest(BaseModel):
+    """Ad-hoc model connectivity probe payload.
+
+    The fields mirror :class:`ModelProfileRequest` minus ``role``. The route
+    builds a transient :class:`HarnessLLMClient` from these values and pings
+    the provider; nothing is persisted.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_name: str
+    base_url: str = ""
+    api_key: str = ""
+    reasoning_mode: bool = True
+
+
+class ModelTestResponse(BaseModel):
+    ok: bool
+    latency_ms: Optional[int] = None
+    message: str
+    model: str
+    base_url: str
 
 
 class SkillOptionResponse(BaseModel):

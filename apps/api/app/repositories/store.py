@@ -20,6 +20,7 @@ from src.apps.api.app.domain.models import (
     CapabilityMutabilityContract,
     Conversation,
     ConversationActionProposalRecord,
+    ConversationHumanConfirmation,
     ConversationMessage,
     EvidenceItem,
     ExecutionLog,
@@ -75,6 +76,7 @@ def _conversation_message_from_doc(doc: dict[str, Any]) -> ConversationMessage:
         source_event_id=doc.get("source_event_id"),
         run_id=doc.get("run_id"),
         action_proposals=list(doc.get("action_proposals", [])),
+        citations=list(doc.get("citations", [])),
         harness_warnings=list(doc.get("harness_warnings", [])),
         tool_calls=list(doc.get("tool_calls", [])),
         process_only=bool(doc.get("process_only", False)),
@@ -160,6 +162,16 @@ def _run_from_doc(doc: dict[str, Any]) -> Run:
         failure_context=doc.get("failure_context", {}),
         events=[_run_event_from_doc(item) for item in doc.get("events", [])],
         config_version_id=doc.get("config_version_id"),
+        skill_name=doc.get("skill_name"),
+        # HCR-P1-02：旧 doc 无这些字段 → None，复现仍走 config_version_id。
+        primary_skill=doc.get("primary_skill"),
+        enabled_skills=doc.get("enabled_skills"),
+        requested_skill_name=doc.get("requested_skill_name"),
+        routing_source=doc.get("routing_source"),
+        waiting_reason=doc.get("waiting_reason"),
+        harness_thread_id=doc.get("harness_thread_id"),
+        harness_checkpoint_status=doc.get("harness_checkpoint_status"),
+        allowed_resumer=doc.get("allowed_resumer"),
     )
 
 
@@ -179,12 +191,31 @@ def _conversation_action_proposal_from_doc(doc: dict[str, Any]) -> ConversationA
         status=doc.get("status", "pending"),
         requires_confirmation=doc.get("requires_confirmation", True),
         run_id=doc.get("run_id"),
+        confirmation_id=doc.get("confirmation_id"),
+        created_at=created_at,
+        updated_at=doc.get("updated_at", created_at),
+    )
+
+
+def _conversation_human_confirmation_from_doc(doc: dict[str, Any]) -> ConversationHumanConfirmation:
+    created_at = doc.get("created_at") or utcnow()
+    return ConversationHumanConfirmation(
+        id=doc["id"],
+        project_id=doc["project_id"],
+        stage_id=doc["stage_id"],
+        conversation_id=doc["conversation_id"],
+        proposal_id=doc["proposal_id"],
+        question=doc["question"],
+        status=doc.get("status", "pending"),
         created_at=created_at,
         updated_at=doc.get("updated_at", created_at),
     )
 
 
 def _file_from_doc(doc: dict[str, Any]) -> FileArtifact:
+    relevance_status = doc.get("relevance_status", "pending_parse")
+    if relevance_status == "unreviewed":
+        relevance_status = "pending_parse"
     return FileArtifact(
         id=doc["id"],
         project_id=doc["project_id"],
@@ -193,6 +224,18 @@ def _file_from_doc(doc: dict[str, Any]) -> FileArtifact:
         status=doc["status"],
         storage_path=doc.get("storage_path"),
         size_bytes=doc.get("size_bytes", 0),
+        relevance_status=relevance_status,
+        relevance_score=float(doc.get("relevance_score", 0.0) or 0.0),
+        relevance_reasons=list(doc.get("relevance_reasons", []) or []),
+        relevance_rule_version=doc.get("relevance_rule_version", ""),
+        relevance_input_hash=doc.get("relevance_input_hash", ""),
+        relevance_source=doc.get("relevance_source", "machine"),
+        relevance_review_reason=doc.get("relevance_review_reason"),
+        relevance_reviewed_by=doc.get("relevance_reviewed_by"),
+        relevance_reviewed_at=doc.get("relevance_reviewed_at"),
+        # HCR-P1-03：人工复核前态，旧 doc 无 → None。
+        relevance_previous_status=doc.get("relevance_previous_status"),
+        security_rejected=bool(doc.get("security_rejected", False)),
         created_at=doc["created_at"],
     )
 
@@ -214,6 +257,10 @@ def _stage_result_from_doc(doc: dict[str, Any]) -> StageResult:
         confirmation_ids=doc.get("confirmation_ids", []),
         result_payload=doc.get("result_payload", {}),
         summary=doc.get("summary", ""),
+        valid_result=bool(doc.get("valid_result", True)),
+        invalid_reason=doc.get("invalid_reason"),
+        invalidated_at=doc.get("invalidated_at"),
+        superseded_by_run_id=doc.get("superseded_by_run_id"),
         created_at=doc["created_at"],
         updated_at=doc.get("updated_at", doc["created_at"]),
         locked_at=doc.get("locked_at"),
@@ -221,6 +268,9 @@ def _stage_result_from_doc(doc: dict[str, Any]) -> StageResult:
         # pre-date this migration.
         prompt_hashes=doc.get("prompt_hashes", {}) or {},
         prompt_versions=doc.get("prompt_versions", {}) or {},
+        # HCR-P1-02：first-class 溯源字段，旧 doc 无 → None。
+        skill_name=doc.get("skill_name"),
+        config_version_id=doc.get("config_version_id"),
     )
 
 
@@ -248,6 +298,9 @@ def _autoresearch_record_from_doc(doc: dict[str, Any]) -> AutoResearchRecord:
 
 
 def _evidence_from_doc(doc: dict[str, Any]) -> EvidenceItem:
+    relevance_status = doc.get("relevance_status", "pending_parse")
+    if relevance_status == "unreviewed":
+        relevance_status = "pending_parse"
     return EvidenceItem(
         id=doc["id"],
         project_id=doc["project_id"],
@@ -259,6 +312,17 @@ def _evidence_from_doc(doc: dict[str, Any]) -> EvidenceItem:
         created_at=doc["created_at"],
         status=doc.get("status", "parsed"),
         review_note=doc.get("review_note"),
+        relevance_status=relevance_status,
+        relevance_score=float(doc.get("relevance_score", 0.0) or 0.0),
+        relevance_reasons=list(doc.get("relevance_reasons", []) or []),
+        relevance_rule_version=doc.get("relevance_rule_version", ""),
+        relevance_input_hash=doc.get("relevance_input_hash", ""),
+        relevance_source=doc.get("relevance_source", "machine"),
+        relevance_review_reason=doc.get("relevance_review_reason"),
+        relevance_reviewed_by=doc.get("relevance_reviewed_by"),
+        relevance_reviewed_at=doc.get("relevance_reviewed_at"),
+        # HCR-P1-03：人工复核前态，旧 doc 无 → None。
+        relevance_previous_status=doc.get("relevance_previous_status"),
         updated_at=doc.get("updated_at", doc["created_at"]),
     )
 
@@ -443,6 +507,48 @@ def add_conversation_message(conversation_id: str, message: ConversationMessage)
     )
 
 
+def upsert_conversation_message_by_run(conversation_id: str, message: ConversationMessage) -> None:
+    """Replace the message a Run has written to a conversation (one per ``run_id``).
+
+    A Run writes at most one visible message at a time (a ``waiting_user``
+    placeholder, then a terminal summary). This removes any prior message with
+    the same ``run_id`` before appending the new one, so the conversation never
+    accumulates stale bubbles for a single Run.
+    """
+    database = get_mongo_database()
+    serialized = _serialize(message)
+    run_id = message.run_id
+    if not run_id:
+        raise ValueError("upsert_conversation_message_by_run requires a message with run_id")
+    database["conversations"].update_one(
+        {"id": conversation_id},
+        {"$pull": {"messages": {"run_id": run_id}}},
+    )
+    database["conversations"].update_one(
+        {"id": conversation_id},
+        {
+            "$push": {"messages": serialized},
+            "$set": {"updated_at": utcnow()},
+        },
+    )
+
+
+def delete_conversation_messages_by_run(conversation_id: str, run_id: str) -> None:
+    """Remove every message a Run has written to its conversation.
+
+    Used on resume/reject so a stale ``waiting_user`` placeholder is cleared
+    before the resumed terminal outcome is persisted.
+    """
+    database = get_mongo_database()
+    database["conversations"].update_one(
+        {"id": conversation_id},
+        {
+            "$pull": {"messages": {"run_id": run_id}},
+            "$set": {"updated_at": utcnow()},
+        },
+    )
+
+
 def save_run(run: Run) -> None:
     _save_mongo("runs", run.id, _serialize(run))
 
@@ -462,6 +568,12 @@ def list_run_events(run_id: str) -> list[RunEvent]:
 
 def list_run_events_by_conversation(conversation_id: str) -> list[RunEvent]:
     events = _list_mongo("run_events", {"conversation_id": conversation_id}, _run_event_from_doc)
+    return sorted(events, key=lambda item: item.created_at)
+
+
+def list_run_events_by_stage(stage_id: str) -> list[RunEvent]:
+    """Return all stage events, including Runs started outside a conversation."""
+    events = _list_mongo("run_events", {"stage_id": stage_id}, _run_event_from_doc)
     return sorted(events, key=lambda item: item.created_at)
 
 
@@ -525,6 +637,10 @@ def list_conversation_action_proposals(
     return sorted(proposals, key=lambda item: item.created_at)
 
 
+def save_conversation_human_confirmation(confirmation: ConversationHumanConfirmation) -> None:
+    _save_mongo("conversation_human_confirmations", confirmation.id, _serialize(confirmation))
+
+
 def save_file_artifact(file_artifact: FileArtifact) -> None:
     _save_mongo("files", file_artifact.id, _serialize(file_artifact))
 
@@ -576,12 +692,58 @@ def get_latest_stage_result(stage_id: str) -> Optional[StageResult]:
     return results[-1]
 
 
+def get_latest_valid_stage_result(stage_id: str) -> Optional[StageResult]:
+    """Return the newest result allowed to influence downstream decisions.
+
+    A recent draft may exist solely to preserve an audit trace for a failed,
+    waiting-input, or waiting-HITL Run.  Such a record must not silently
+    replace the last valid stage output for a dependent stage or report.
+    """
+    for result in reversed(list_stage_results(stage_id)):
+        # ``valid_result`` was introduced after earlier Runs had already
+        # persisted. A legacy Stage 1 result may falsely carry True despite
+        # zero input/evidence bindings. Treat it as audit-only without
+        # modifying the historical record; an authorized backfill can later
+        # make its invalidation explicit.
+        # Stage 1 is the evidence-led AML gate. Later stages may legitimately
+        # consume a prior stage result without carrying a fresh file binding.
+        has_bound_inputs = (
+            not stage_id.endswith("stage-1")
+            or bool(result.input_file_ids and result.evidence_item_ids)
+        )
+        if result.valid_result and has_bound_inputs:
+            return result
+    return None
+
+
 def save_evidence_item(evidence_item: EvidenceItem) -> None:
     _save_mongo("evidence_items", evidence_item.id, _serialize(evidence_item))
 
 
 def list_evidence_items(project_id: Optional[str]) -> list[EvidenceItem]:
     return _list_mongo("evidence_items", {"project_id": project_id} if project_id else None, _evidence_from_doc)
+
+
+def delete_evidence_items_by_file(file_id: str, *, preserve_evidence_id: Optional[str] = None) -> int:
+    """Delete stale evidence derived from *file_id*.
+
+    ``preserve_evidence_id`` keeps the canonical file-evidence record stable
+    during re-parse. Vision records are intentionally left untouched because
+    re-parsing does not modify the uploaded source bytes.
+    """
+    try:
+        database = get_mongo_database()
+        query: dict[str, Any] = {"source_file_id": file_id, "source_type": "file"}
+        if preserve_evidence_id:
+            query["id"] = {"$ne": preserve_evidence_id}
+        result = database["evidence_items"].delete_many(query)
+        return int(result.deleted_count or 0)
+    except PyMongoError as exc:
+        logger.exception(
+            "MongoDB evidence delete failed. collection=evidence_items file_id=%s",
+            file_id,
+        )
+        raise RepositoryUnavailableError("delete", "evidence_items", query) from exc
 
 
 def save_report(report: ReportArtifact) -> None:
@@ -657,6 +819,7 @@ def _stage_skill_profile_from_doc(doc: dict[str, Any]) -> StageSkillProfile:
         primary_skill=doc["primary_skill"],
         enabled_tools=list(doc.get("enabled_tools", [])),
         enabled_subagents=list(doc.get("enabled_subagents", [])),
+        enabled_skills=list(doc.get("enabled_skills", [])),
         auto_run_condition=doc.get("auto_run_condition", "manual"),
         harness_version=doc.get("harness_version", DEFAULT_AGENT_HARNESS_VERSION),
         conversation_harness_version=doc.get("conversation_harness_version", DEFAULT_CONVERSATION_HARNESS_VERSION),

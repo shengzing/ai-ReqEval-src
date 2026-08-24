@@ -5,6 +5,7 @@ import { ListFilter } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { EvidenceItem } from '@/lib/types'
+import type { FileParseStateMap } from '@/lib/file-parse-lifecycle'
 import type { EvidenceStatusFilter, EvidenceSuggestionInput } from './evidence-types'
 import { EvidenceGroup } from './evidence-group'
 import { EvidenceStatusFilter as EvidenceStatusFilterControl } from './evidence-status-filter'
@@ -22,7 +23,13 @@ interface EvidencePanelProps {
   onStatusFilterChange: (status: EvidenceStatusFilter) => void
   onToggleGroup: (group: string) => void
   onParseFile?: (fileId: string) => Promise<void> | void
+  fileParseStates: FileParseStateMap
   onVisionParseFile?: (fileId: string) => Promise<void> | void
+  onReviewRelevance?: (
+    fileId: string,
+    decision: 'related' | 'unrelated' | 'rejected',
+    reason: string,
+  ) => Promise<void> | void
   onAskEvidenceDetail?: (prompt: string) => Promise<void> | void
   onCreateEvidenceSuggestion?: (input: EvidenceSuggestionInput) => Promise<void> | void
   onPreviewResource?: (item: EvidenceItem) => void
@@ -41,7 +48,9 @@ export function EvidencePanel({
   onStatusFilterChange,
   onToggleGroup,
   onParseFile,
+  fileParseStates,
   onVisionParseFile,
+  onReviewRelevance,
   onAskEvidenceDetail,
   onCreateEvidenceSuggestion,
   onPreviewResource,
@@ -81,7 +90,9 @@ export function EvidencePanel({
             highlightedEvidenceName={highlightedEvidenceName}
             onToggleGroup={onToggleGroup}
             onParseFile={onParseFile}
+            fileParseStates={fileParseStates}
             onVisionParseFile={onVisionParseFile}
+            onReviewRelevance={onReviewRelevance}
             onAskEvidenceDetail={onAskEvidenceDetail}
             onCreateEvidenceSuggestion={onCreateEvidenceSuggestion}
             onPreviewResource={onPreviewResource}

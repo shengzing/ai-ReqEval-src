@@ -21,6 +21,10 @@
   --accent-foreground: #24124d;
   --destructive: #c43258;
   --destructive-foreground: oklch(1.0000 0 0);
+  --warning: #f5a524;
+  --warning-foreground: #6a3a00;
+  --success: #1f9d6b;
+  --success-foreground: #064a2f;
   --border: #dfd2f5;
   --input: #d4c3ef;
   --ring: #b45cff;
@@ -63,6 +67,10 @@
   --accent-foreground: #edf3ff;
   --destructive: #f07a9c;
   --destructive-foreground: oklch(1.0000 0 0);
+  --warning: #f5b94a;
+  --warning-foreground: #2a1600;
+  --success: #4ad4a0;
+  --success-foreground: #04241a;
   --border: #51337d;
   --input: #51337d;
   --ring: #c4a0ff;
@@ -88,8 +96,8 @@
 }
 
 @theme inline {
-  --font-sans: 'Geist', 'Geist Fallback';
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --font-sans: 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -106,6 +114,10 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -126,7 +138,7 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --font-serif: 'Source Serif 4', 'Source Serif 4 Fallback';
+  --font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
   /* computed shadow variables below - do not modify */
   --shadow-2xs: var(--shadow-x) var(--shadow-y) color-mix(in srgb, var(--shadow-color) calc(var(--shadow-opacity) * 100%), transparent);
   --shadow-xs: var(--shadow-x) var(--shadow-y) var(--shadow-blur) var(--shadow-spread) color-mix(in srgb, var(--shadow-color) calc(var(--shadow-opacity) * 100%), transparent);
@@ -151,4 +163,23 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Respect reduced-motion preferences for ambient animations
+   (typing dots, pulse). WCAG 2.3.3 (AAA) — animation must be
+   disable-able. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Anchor auto-scroll target so chat bottom doesn't get clipped by
+   sticky headers. Project-wide default; per-component can override. */
+[data-chat-anchor] {
+  scroll-margin-bottom: 80px;
 }

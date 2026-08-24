@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from src.apps.api.app.api.v1.schemas.settings import (
     ModelOptionListResponse,
     ModelOptionResponse,
+    ModelTestRequest,
+    ModelTestResponse,
     ProjectSettingsBundleResponse,
     ProjectSettingsListResponse,
     ProjectSettingsResponse,
@@ -17,6 +19,7 @@ from src.apps.api.app.api.v1.schemas.settings import (
     SkillOptionResponse,
 )
 from src.apps.api.app.domain.models import ModelProfile, PromptTemplate, RunPolicy, StageSkillProfile
+from src.apps.api.app.agents.harness.llm import HarnessLLMClient
 from src.apps.api.app.services.settings_service import (
     build_settings_impact,
     ensure_default_settings,
@@ -73,6 +76,7 @@ def _to_response(settings) -> ProjectSettingsResponse:
                 "primary_skill": profile.primary_skill,
                 "enabled_tools": list(profile.enabled_tools),
                 "enabled_subagents": list(profile.enabled_subagents),
+                "enabled_skills": list(profile.enabled_skills),
                 "auto_run_condition": profile.auto_run_condition,
                 "harness_version": profile.harness_version,
                 "conversation_harness_version": profile.conversation_harness_version,
@@ -128,6 +132,7 @@ def _draft_request_to_domain(request: SettingsDraftRequest):
             primary_skill=item.primary_skill,
             enabled_tools=list(item.enabled_tools),
             enabled_subagents=list(item.enabled_subagents),
+            enabled_skills=list(item.enabled_skills),
             auto_run_condition=item.auto_run_condition,
             harness_version=item.harness_version,
             conversation_harness_version=item.conversation_harness_version,
@@ -221,6 +226,34 @@ def get_project_settings_versions(project_id: str) -> ProjectSettingsListRespons
 def get_project_settings_impact(project_id: str) -> SettingsImpactResponse:
     payload = build_settings_impact(project_id)
     return SettingsImpactResponse(**payload)
+
+
+@router.post(
+    "/projects/{project_id}/settings/models/test",
+    response_model=ModelTestResponse,
+)
+def post_project_settings_model_test(
+    project_id: str,
+    request: ModelTestRequest,
+) -> ModelTestResponse:
+    """Probe a model configuration without persisting anything.
+
+    Accepts the same fields as a single :class:`ModelProfileRequest` (minus
+    ``role``) plus the project's existing role values as defaults, builds a
+    transient :class:`HarnessLLMClient`, and issues a 1-token chat completion
+    to verify connectivity/credentials. Returns ok / latency / message.
+    """
+    base_url = request.base_url or ""
+    api_key = request.api_key or ""
+    model = request.model_name or ""
+    client = HarnessLLMClient(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        reasoning_mode=request.reasoning_mode,
+    )
+    result = client.ping()
+    return ModelTestResponse(**result)
 
 
 @router.get("/model-options", response_model=ModelOptionListResponse)

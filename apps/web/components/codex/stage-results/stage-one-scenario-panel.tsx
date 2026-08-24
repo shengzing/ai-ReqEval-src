@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import { AlertTriangle, CheckCircle2, FileCheck2, GitBranch, MessageSquareWarning, ShieldCheck, XCircle } from 'lucide-react'
 
 import type { EvidenceItem, Stage } from '@/lib/types'
-import { asArray, asRecord, getFirst, CardGridPanel, ObjectListPanel, PanelTitle, RawPayloadPanel, RiskGovernanceMatrixPanel, TagPanel } from './result-renderers'
+import { asArray, asRecord, getFirst, BoundaryReviewStatusBadge, CardGridPanel, CrossSystemLinksPanel, ErrorAmplificationPathsPanel, ObjectListPanel, PanelTitle, RawPayloadPanel, RiskGovernanceMatrixPanel, TagPanel } from './result-renderers'
 import { SAPWorkflowPanel } from './sap-workflow-panel'
 
 /** Render a field badge: "missing" for absent, error badge for invalid enums. */
@@ -121,6 +121,10 @@ const QUALITY_SCORE_LABELS: Record<string, string> = {
   risk_item_node_binding_score: '风险项节点绑定度',
   hitl_rule_node_binding_score: 'HITL 规则节点绑定度',
   deliverable_readiness_score: '交付物就绪度',
+  // F2/F3 新增产物覆盖度
+  cross_system_link_score: '跨系统链路覆盖度',
+  error_path_coverage_score: '错误放大路径覆盖度',
+  extended_deliverable_readiness_score: '扩展交付物就绪度',
 }
 
 function QualityScoresPanel({ quality }: { quality: Record<string, unknown> }) {
@@ -189,6 +193,12 @@ export function StageOneScenarioPanel({ stage, evidenceItems }: { stage: Stage; 
   const outOfScope = asArray(boundary.out_of_scope)
   const preconditions = asArray(boundary.preconditions)
   const dataBoundary = asArray(boundary.data_boundary)
+
+  // ── 1a. F2/F3 derived artifacts (单项目级) ──────────────────────
+  // 主案例定义 / 补充验证场景 / 材料清单是课题级产物，不在单项目内。
+  const crossSystemLinks = asArray(scenarioSummary.cross_system_links)
+  const errorAmplificationPaths = asArray(scenarioSummary.error_amplification_paths)
+  const boundaryReviewStatus = String(scenarioSummary.boundary_review_status ?? 'business_pending')
 
   // ── 3. Participants ──────────────────────────────────────────────────
   const participants = asArray(scenarioSummary.participants)
@@ -299,6 +309,9 @@ export function StageOneScenarioPanel({ stage, evidenceItems }: { stage: Stage; 
           </div>
         </div>
 
+        {/* F1: 本项目边界业务侧认可状态（主案例/补充场景/材料清单是课题级产物，不在单项目内） */}
+        <BoundaryReviewStatusBadge reviewStatus={boundaryReviewStatus} />
+
         {/* 2. SAP workflow */}
         <SAPWorkflowPanel
           sopSummary={scenarioSummary.sop_summary}
@@ -314,6 +327,12 @@ export function StageOneScenarioPanel({ stage, evidenceItems }: { stage: Stage; 
 
         {/* 6. Risk governance matrix — 风险项以小卡片形式内嵌矩阵行内，点击展开详情 */}
         <RiskGovernanceMatrixPanel items={riskGovernanceMatrix} riskItems={riskItems} evidenceMap={evidenceMap} />
+
+        {/* F3: 错误放大路径 */}
+        <ErrorAmplificationPathsPanel items={errorAmplificationPaths} />
+
+        {/* F2: 跨系统链路 */}
+        <CrossSystemLinksPanel items={crossSystemLinks} />
 
         {/* 7. Risk items (legacy standalone panel — removed, now folded into the matrix above) */}
 

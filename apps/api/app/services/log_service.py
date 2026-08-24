@@ -6,6 +6,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from src.apps.api.app.domain.models import ExecutionLog, VersionLog
+from src.apps.api.app.security.sanitization import redact_value
 from src.apps.api.app.repositories.store import (
     list_execution_logs as repo_list_execution_logs,
     list_version_logs as repo_list_version_logs,
@@ -30,7 +31,7 @@ def create_execution_log(
         resource_type=resource_type,
         resource_id=resource_id,
         run_id=run_id,
-        details=details or {},
+        details=redact_value(details or {}),
     )
     save_execution_log(log)
     return log
@@ -54,7 +55,7 @@ def create_version_log(
         change_type=change_type,
         summary=summary,
         run_id=run_id,
-        details=details or {},
+        details=redact_value(details or {}),
     )
     save_version_log(log)
     return log

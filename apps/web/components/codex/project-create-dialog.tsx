@@ -120,14 +120,14 @@ export function ProjectCreateDialog({ open, onOpenChange, onCreateProject }: Pro
             <div className="flex items-center gap-1.5">
               <label className="text-sm font-medium text-foreground">首批材料</label>
               <FieldHelp label="首批材料">
-                上传项目初始化资料，例如需求文档、开题报告、调研材料、评估标准、截图或表格。支持常见文本、PDF、Word、Excel、图片等格式；当前只保存到项目目录，不自动解析。
+                上传项目初始化资料，例如需求文档、开题报告、调研材料、评估标准、截图或表格。支持常见文本、PDF、Word、Excel、图片等格式；上传后自动解析可读取的文档。
               </FieldHelp>
             </div>
             <div className="min-w-0 rounded-md border border-dashed border-border p-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <p className="text-sm text-foreground">可在创建项目时一起上传首批文件</p>
-                  <p className="mt-1 text-xs text-muted-foreground">当前只上传到项目目录，不自动解析，不自动启动分析。</p>
+                  <p className="mt-1 text-xs text-muted-foreground">上传后自动解析文档并判断项目相关性；图片保留视觉解析入口，不会自动启动阶段分析。</p>
                   <p className="mt-1 text-xs text-muted-foreground">建议格式：.docx、.pdf、.xlsx、.csv、.md、.txt、.png、.jpg。</p>
                 </div>
                 <label htmlFor="project-files" className="inline-flex shrink-0 cursor-pointer items-center rounded-md focus-within:ring-2 focus-within:ring-ring">

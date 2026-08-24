@@ -1,13 +1,14 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Home, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen, Plus, Search, Settings } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { type Project } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { ProjectTree } from './navigation/project-tree'
+import { RequestMetricsPanel } from './request-metrics-panel'
 
 interface LeftSidebarProps {
   projects: Project[]
@@ -103,19 +104,21 @@ export function LeftSidebar({
     <div
       className={cn(
         'flex h-auto max-h-[42vh] w-full shrink-0 flex-col border-b border-border bg-sidebar lg:h-full lg:max-h-none lg:border-b-0 lg:border-r lg:transition-[width] lg:duration-200',
-        collapsed ? 'lg:w-[68px]' : 'lg:min-w-[320px] lg:w-[320px]'
+        collapsed ? 'lg:w-14' : 'lg:min-w-[320px] lg:w-[320px]'
       )}
     >
-      {/* App branding / Home */}
+      {/* App branding */}
       <div className="flex items-center border-b border-border">
         <button
           type="button"
           onClick={onGoHome}
           title="返回首页"
-          className="flex min-w-0 flex-1 items-center gap-2 px-4 py-3 text-sm font-semibold text-sidebar-foreground transition-colors hover:bg-sidebar-accent/50"
+          className={cn(
+            'min-w-0 flex-1 items-center px-4 py-3 text-left text-sm font-semibold text-sidebar-foreground transition-colors hover:bg-sidebar-accent/50',
+            collapsed ? 'flex lg:hidden' : 'flex'
+          )}
         >
-          <Home className="size-4 shrink-0" />
-          <span className={cn(collapsed && 'lg:hidden')}>AI-ReqEval</span>
+          <span>AI-ReqEval</span>
         </button>
         <Button
           type="button"
@@ -124,7 +127,10 @@ export function LeftSidebar({
           onClick={() => setCollapsed((value) => !value)}
           aria-label={collapsed ? '展开左侧工具栏' : '收起左侧工具栏'}
           title={collapsed ? '展开左侧工具栏' : '收起左侧工具栏'}
-          className="mr-2 hidden size-7 text-sidebar-foreground/65 hover:text-sidebar-foreground lg:inline-flex"
+          className={cn(
+            'hidden size-7 text-sidebar-foreground/65 hover:text-sidebar-foreground lg:inline-flex',
+            collapsed ? 'mx-auto' : 'mr-2'
+          )}
         >
           {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
         </Button>
@@ -207,6 +213,8 @@ export function LeftSidebar({
 
           {/* Settings at Bottom */}
           <div className="border-t border-border p-2">
+            {/* dev-only 请求指标：嵌在「设置」上方，随侧栏布局不再遮挡右下角内容 */}
+            {process.env.NODE_ENV === 'development' && <RequestMetricsPanel variant="inline" />}
             <button
               type="button"
               onClick={onOpenSettings}

@@ -52,6 +52,13 @@ def _is_substantive(value: Any) -> bool:
 RISK_LEVELS = {"L1", "L2", "L3"}
 HITL_LEVELS = {"none", "standard", "strict", "mandatory"}
 
+# ── Boundary review status (F1 business-side acknowledgment) ─────────
+BOUNDARY_REVIEW_STATUSES = {
+    "business_pending",      # 业务侧尚未认可（研究侧版本，待业务确认）
+    "business_confirmed",    # 业务侧已认可边界
+    "business_rejected",     # 业务侧退回，需修订边界
+}
+
 # ── Risk normalization mappings ───────────────────────────────────────
 
 _RISK_L1_ALIASES = {"low", "低", "l1", "1"}
@@ -138,6 +145,27 @@ def normalize_hitl_level(value: object, *, risk_level: str | None = None) -> str
         result = "strict"
 
     return result
+
+
+# ── Stage 1 HITL policy (L3 / boundary mandates human review) ─────────
+
+def stage1_requires_human_review(
+    *, risk_level: str | None, boundary_flag: bool = False
+) -> bool:
+    """Explicit Stage-1 HITL policy: L3 or boundary risk mandates human review.
+
+    Decoupled from the ``enable_hitl`` checkpoint flag — this function takes
+    no such parameter, so the L3-mandatory rule cannot be turned off by the
+    harness checkpoint default. An L3/boundary result must not auto-complete
+    even when no durable checkpoint was taken. The boolean truth table matches
+    the previous inline expression ``bool(risk_level == "L3" or boundary_flag)``
+    bit-for-bit (``boundary_flag`` is normalised through ``bool()``).
+    """
+    if risk_level == "L3":
+        return True
+    if boundary_flag:
+        return True
+    return False
 
 
 # ── Validation ────────────────────────────────────────────────────────
@@ -397,6 +425,67 @@ def validate_risk_grading(summary: dict) -> list[dict]:
                 "suggested_action": "Re-run risk classification or adjust confidence distribution",
             })
 
+    # 15. Error amplification paths — M1 硬性收口：L2/L3 至少 3 条可定位的错误放大路径
+    error_paths = summary.get("error_amplification_paths", [])
+    # An error path is "substantive" when it carries a description OR at least
+    # one amplification mechanism. Short Chinese identifiers ("漏报链") fall
+    # below the 10-char generic heuristic, so check presence rather than length.
+    substantive_paths = [
+        p for p in error_paths
+        if isinstance(p, dict)
+        and (
+            str(p.get("description", "")).strip()
+            or (
+                isinstance(p.get("amplification_mechanisms"), list)
+                and any(str(m).strip() for m in p["amplification_mechanisms"])
+            )
+        )
+    ]
+    if rl in {"L2", "L3"} and len(substantive_paths) < 3:
+        issues.append({
+            "issue_type": "missing_field",
+            "field": "error_amplification_paths",
+            "severity": "high",
+            "message": (
+                f"{rl} 风险至少需 3 条错误放大路径，当前 {len(substantive_paths)} 条"
+            ),
+            "suggested_action": "Derive error amplification paths from risk-bound process nodes",
+        })
+
+    # 16. Cross-system link coverage — F2 要求流程节点绑定跨系统链路
+    links = summary.get("cross_system_links", [])
+    process_nodes_all = summary.get("process_nodes", [])
+    known_ids = {
+        str(node.get("node_id", ""))
+        for node in process_nodes_all
+        if isinstance(node, dict) and node.get("node_id")
+    }
+    if process_nodes_all:
+        linked_ids = {
+            str(link.get("node_id", ""))
+            for link in links
+            if isinstance(link, dict) and link.get("node_id")
+        }
+        if known_ids and not linked_ids:
+            issues.append({
+                "issue_type": "missing_field",
+                "field": "cross_system_links",
+                "severity": "medium",
+                "message": "跨系统链路为空，流程节点未绑定系统",
+                "suggested_action": "Bind each process node to its systems （预警平台/贷后系统/核心系统）",
+            })
+
+    # 18. Boundary review status — 业务侧认可边界的状态显式可见
+    brs = summary.get("boundary_review_status")
+    if brs is not None and brs not in BOUNDARY_REVIEW_STATUSES:
+        issues.append({
+            "issue_type": "invalid_enum",
+            "field": "boundary_review_status",
+            "severity": "medium",
+            "message": f"boundary_review_status must be one of {sorted(BOUNDARY_REVIEW_STATUSES)}, got {brs!r}",
+            "suggested_action": "Set to business_pending / business_confirmed / business_rejected",
+        })
+
     return issues
 
 
@@ -617,6 +706,24 @@ def compute_scenario_quality(summary: dict) -> dict:
         and _main_path_valid(edges, main_path, process_nodes)
     ) else 0.0
 
+    # Supplementary verification scenarios — 步骤1 要求 2-3 个贷后相近补充场景
+    # Cross-system link coverage — F2 要求流程节点绑定跨系统链路
+    links = summary.get("cross_system_links", [])
+    process_node_ids = {
+        str(node.get("node_id", ""))
+        for node in process_nodes
+        if isinstance(node, dict) and node.get("node_id")
+    }
+    if process_node_ids:
+        linked_ids = {
+            str(link.get("node_id", ""))
+            for link in links
+            if isinstance(link, dict) and link.get("node_id")
+        }
+        cross_system_link_score = len(linked_ids) / len(process_node_ids)
+    else:
+        cross_system_link_score = 0.0
+
     return {
         "completeness_score": completeness,
         "participant_split_score": participant_split,
@@ -626,6 +733,7 @@ def compute_scenario_quality(summary: dict) -> dict:
         "audit_node_mapping_score": audit_node_mapping,
         "flow_diagram_score": flow_diagram_score,
         "flow_diagram_generated": flow_diagram_score == 1.0,
+        "cross_system_link_score": cross_system_link_score,
     }
 
 
@@ -700,6 +808,23 @@ def compute_risk_quality(summary: dict) -> dict:
 
     risk_node_binding = (risk_item_binding_score + hitl_rule_binding_score) / 2
 
+    # Error amplification path coverage: >=3 substantive paths = 1.0 (M1 gate)
+    error_paths = summary.get("error_amplification_paths", [])
+    substantive_paths = [
+        p for p in error_paths
+        if isinstance(p, dict)
+        and (
+            str(p.get("description", "")).strip()
+            or (
+                isinstance(p.get("amplification_mechanisms"), list)
+                and any(str(m).strip() for m in p["amplification_mechanisms"])
+            )
+        )
+    ]
+    error_path_coverage = min(1.0, len(substantive_paths) / 3) if rl in {"L2", "L3"} else (
+        1.0 if substantive_paths else 0.0
+    )
+
     return {
         "evidence_coverage_score": evidence_coverage,
         "risk_consistency_score": risk_consistency,
@@ -707,6 +832,7 @@ def compute_risk_quality(summary: dict) -> dict:
         "risk_item_node_binding_score": risk_item_binding_score,
         "hitl_rule_node_binding_score": hitl_rule_binding_score,
         "risk_node_binding_score": risk_node_binding,
+        "error_path_coverage_score": error_path_coverage,
     }
 
 
@@ -744,6 +870,15 @@ def compute_stage1_quality(summary: dict) -> dict:
         + phase_b["risk_node_binding_score"]
     ) / 7
 
+    # Stage-1 deliverable readiness for the F2/F3 product fields:
+    # cross-system links (F2) + error amplification paths (F3). These are
+    # advisory coverage signals, not gating. (F1 主案例/补充场景/材料清单
+    # 是课题级产物，不在单项目 scenario_summary 内，不计入此处。)
+    extended_readiness = (
+        phase_a["cross_system_link_score"]
+        + phase_b["error_path_coverage_score"]
+    ) / 2
+
     return {
         "completeness_score": round(phase_a["completeness_score"], 4),
         "evidence_coverage_score": round(phase_b["evidence_coverage_score"], 4),
@@ -761,4 +896,7 @@ def compute_stage1_quality(summary: dict) -> dict:
         "risk_item_node_binding_score": round(phase_b["risk_item_node_binding_score"], 4),
         "hitl_rule_node_binding_score": round(phase_b["hitl_rule_node_binding_score"], 4),
         "deliverable_readiness_score": round(deliverable_readiness, 4),
+        "cross_system_link_score": round(phase_a["cross_system_link_score"], 4),
+        "error_path_coverage_score": round(phase_b["error_path_coverage_score"], 4),
+        "extended_deliverable_readiness_score": round(extended_readiness, 4),
     }

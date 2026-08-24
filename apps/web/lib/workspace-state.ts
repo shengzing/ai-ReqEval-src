@@ -4,6 +4,8 @@ export function buildEnrichedStage(input: {
   currentStage?: Stage
   resultPayload?: Record<string, unknown>
   reportInfo?: Stage['reportInfo']
+  versionLog?: Stage['versionLog']
+  lockCheck?: Stage['lockCheck']
   skills: StageSkill[]
   suggestions: SuggestionCard[]
   currentRunStatus?: RunStatus
@@ -14,6 +16,8 @@ export function buildEnrichedStage(input: {
     ...input.currentStage,
     resultPayload: input.resultPayload,
     reportInfo: input.reportInfo,
+    versionLog: input.versionLog,
+    lockCheck: input.lockCheck,
     skills: input.skills,
     pendingConfirmations: input.suggestions.length,
     recommendedActions:

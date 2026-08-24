@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from src.apps.api.app.api.v1.router import api_router
 from src.apps.api.app.core.config import get_settings
+from src.apps.api.app.core.logging_config import configure_logging
 from src.apps.api.app.repositories.store import RepositoryUnavailableError
 
 
@@ -49,6 +50,10 @@ def _resolve_static_candidate(static_root: Path, full_path: str) -> Path | None:
 
 
 def create_app() -> FastAPI:
+    # Configure console logging once, before anything else starts emitting.
+    # FORMAT: 2026-08-14 21:03:12  INFO  src.apps.api...  func:line  message
+    # Level via LOG_LEVEL (default INFO; DEBUG for app loggers).
+    configure_logging()
     settings = get_settings()
     app = FastAPI(
         title="AI ReqEval API",

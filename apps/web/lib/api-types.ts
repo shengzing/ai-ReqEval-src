@@ -37,6 +37,14 @@ export interface ApiStageResult {
   created_at: string
   updated_at: string
   locked_at?: string | null
+  valid_result?: boolean
+  invalid_reason?: string | null
+  invalidated_at?: string | null
+  superseded_by_run_id?: string | null
+  /** HCR-P1-02 first-class provenance (legacy docs: undefined). */
+  skill_name?: string | null
+  /** HCR-P1-02 first-class provenance (legacy docs: undefined). */
+  config_version_id?: string | null
 }
 
 export interface ApiConversation {
@@ -60,7 +68,9 @@ export interface ApiConversation {
       title: string
       requires_confirmation: boolean
       status: string
+      confirmation_id?: string | null
     }>
+    citations?: Array<Record<string, unknown>>
     harness_warnings?: Array<Record<string, unknown>>
     tool_calls?: Array<Record<string, unknown>>
     process_only?: boolean
@@ -89,6 +99,17 @@ export interface ApiEvidenceItem {
   created_at: string
   status: string
   review_note?: string | null
+  relevance_status?: 'pending_parse' | 'related' | 'needs_review' | 'unrelated' | 'rejected' | 'unreviewed'
+  relevance_score?: number
+  relevance_reasons?: string[]
+  relevance_rule_version?: string
+  relevance_input_hash?: string
+  relevance_source?: 'machine' | 'human'
+  relevance_review_reason?: string | null
+  relevance_reviewed_by?: string | null
+  relevance_reviewed_at?: string | null
+  /** HCR-P1-03 previous relevance status before human review (legacy: undefined). */
+  relevance_previous_status?: string | null
   updated_at: string
 }
 
@@ -100,6 +121,18 @@ export interface ApiFileArtifact {
   status: string
   storage_path?: string | null
   size_bytes: number
+  relevance_status?: 'pending_parse' | 'related' | 'needs_review' | 'unrelated' | 'rejected' | 'unreviewed'
+  relevance_score?: number
+  relevance_reasons?: string[]
+  relevance_rule_version?: string
+  relevance_input_hash?: string
+  relevance_source?: 'machine' | 'human'
+  relevance_review_reason?: string | null
+  relevance_reviewed_by?: string | null
+  relevance_reviewed_at?: string | null
+  /** HCR-P1-03 previous relevance status before human review (legacy: undefined). */
+  relevance_previous_status?: string | null
+  security_rejected?: boolean
   created_at: string
 }
 
@@ -162,7 +195,36 @@ export interface ApiRun {
   failure_reason?: string | null
   failure_context?: Record<string, unknown>
   config_version_id?: string | null
+  /** HCR-P1-02 routed skill (legacy runs: undefined). */
+  skill_name?: string | null
+  /** HCR-P1-02 primary skill resolved from frozen snapshot (legacy: undefined). */
+  primary_skill?: string | null
+  /** HCR-P1-02 enabled skills from frozen snapshot (legacy: undefined). */
+  enabled_skills?: string[] | null
+  /** HCR-P1-02 caller-requested skill (legacy: undefined). */
+  requested_skill_name?: string | null
+  /** HCR-P1-02 "snapshot" | "static_fallback" (legacy: undefined). */
+  routing_source?: string | null
+  waiting_reason?: string | null
+  harness_thread_id?: string | null
+  harness_checkpoint_status?: string | null
   created_at: string
+}
+
+/** Read model returned once after a valid Run completes. */
+export interface ApiStageCompletionSnapshot {
+  run: ApiRun
+  stage: ApiStage
+  latest_result?: ApiStageResult | null
+  lock_check: ApiStageLockCheck
+  files: ApiFileArtifact[]
+  evidence: ApiEvidenceItem[]
+  suggestions: ApiAutoResearchRecord[]
+  conversation?: ApiConversation | null
+  workspace: { items: ApiWorkspaceProject[] }
+  /** HCR-P1-05：富集非首屏数据，让前端只读一次快照。两字段 additive。 */
+  version_log?: ApiVersionLog | null
+  vision_results?: ApiVisionResultSummary[]
 }
 
 export interface ApiVersionLog {
@@ -202,6 +264,9 @@ export interface ApiStageLockCheckItem {
   key: string
   label: string
   passed: boolean
+  machine_code: string
+  hint: string
+  object_id?: string | null
 }
 
 export interface ApiReportContent {
@@ -256,6 +321,7 @@ export interface ApiStageSkillProfile {
   primary_skill: string
   enabled_tools: string[]
   enabled_subagents: string[]
+  enabled_skills: string[]
   auto_run_condition: string
   skill_versions: Record<string, string>
 }
@@ -310,6 +376,21 @@ export interface ApiSettingsImpact {
   summary: string
 }
 
+export interface ApiModelTestRequest {
+  model_name: string
+  base_url?: string
+  api_key?: string
+  reasoning_mode?: boolean
+}
+
+export interface ApiModelTestResponse {
+  ok: boolean
+  latency_ms?: number | null
+  message: string
+  model: string
+  base_url: string
+}
+
 export interface StreamRunEventsOptions {
   signal?: AbortSignal
   onEvent?: (frame: RunEventFrame) => void
@@ -322,6 +403,7 @@ export interface ApiAssistantMessage {
   content: string
   created_at: string
   tool_calls?: Array<Record<string, unknown>>
+  citations?: Array<Record<string, unknown>>
 }
 
 /** 对话 Harness 的摘要信息，附在 AppendMessageResponse.harness */
@@ -336,6 +418,8 @@ export interface ApiHarnessSummary {
     title: string
     requires_confirmation: boolean
     status: string
+    run_id?: string | null
+    confirmation_id?: string | null
   }>
 }
 
@@ -353,5 +437,6 @@ export interface ApiConfirmConversationActionProposalResponse {
     id: string
     status: string
   }
-  run_id: string
+  run_id?: string | null
+  confirmation_id?: string | null
 }

@@ -16,6 +16,8 @@ from src.apps.api.app.agents.conversation_harness.adapters.context_tool_adapter 
 from src.apps.api.app.agents.conversation_harness.contracts import (
     ConversationActionProposal,
     ConversationHarnessRequest,
+    normalize_action_proposals,
+    normalize_citations,
 )
 from src.apps.api.app.agents.harness.llm import HarnessLLMClient
 from src.apps.api.app.agents.harness.state import NO_LLM_FALLBACK_MESSAGE
@@ -29,13 +31,16 @@ DEFAULT_CONVERSATION_PROMPT = (
     "你是 AI ReqEval 的阶段对话助手。请基于所提供的项目上下文、阶段上下文、"
     "最新阶段结果、证据摘要、历史消息等上下文，用中文回答用户当前的问题。\n\n"
     "必须返回如下 JSON 结构：\n"
-    '{"reply": "给用户的中文回复", "action_proposals": []}\n\n'
+    '{"reply": "给用户的中文回复", "citations": [], "action_proposals": []}\n\n'
     "回复要求：始终用中文；引用上下文中的具体信息，不要编造上下文中没有的内容；"
-    "不确定时在 reply 中标注“待确认”；回复聚焦用户问题，简洁清晰。\n\n"
-    "受控动作要求：仅当用户明确要求重新分析 / 重跑 / 再跑一次时，才在 "
-    "action_proposals 放入一个对象："
+    "不确定时在 reply 中标注“待确认”；回复聚焦用户问题，简洁清晰。"
+    "如引用事实，citations 必须是 [{\"source\": \"project_context|stage_context|latest_stage_result|"
+    "evidence_summary|run_event|available_skill\", \"id\": \"上下文中的对应 id\", \"field\": \"字段路径\"}]。\n\n"
+    "受控动作要求：仅在用户明确请求时生成 action_proposals。重新分析 / 重跑 / 再跑一次使用 "
     '{"action_type": "propose_create_run", "title": "创建阶段分析任务", '
     '"payload": {"goal": "用户原话"}, "requires_confirmation": true}；'
+    "明确要求调用当前阶段可用 Skill 时使用 propose_invoke_skill，并在 payload 提供 skill_name 和 goal；"
+    "明确要求人工确认时使用 propose_request_human_confirmation，并在 payload 提供 question。"
     "其他情况 action_proposals 必须为空数组。"
 )
 
@@ -47,13 +52,16 @@ def classify_intent(user_message: str) -> dict[str, Any]:
     # keywords are matched against the lowercased text so "Stage" and "stage"
     # hit alike.
     text = user_message.lower()
-    # explain_result is checked before request_run so that phrases like
-    # "请解释执行结果的风险等级" match explain_result instead of being pulled
-    # into request_run by the broad "执行" keyword.
-    if any(keyword in text for keyword in ["为什么", "风险等级", "判成", "结果", "结论", "l1", "l2", "l3"]):
-        return {"type": "explain_result", "confidence": 0.82}
+    # Explicit confirmation and Skill requests take precedence over context
+    # words such as "结果" or "L3" that may occur in the same sentence.
+    if any(keyword in text for keyword in ["人工确认", "人工复核", "请确认", "需要确认"]):
+        return {"type": "request_human_confirmation", "confidence": 0.86}
+    if any(keyword in text for keyword in ["调用skill", "调用 skill", "调用技能", "运行skill", "运行 skill", "运行技能"]):
+        return {"type": "request_skill", "confidence": 0.86}
     if any(keyword in text for keyword in ["重新分析", "重新执行", "重跑", "再跑一次", "重新跑"]):
         return {"type": "request_run", "confidence": 0.9}
+    if any(keyword in text for keyword in ["为什么", "风险等级", "判成", "结果", "结论", "l1", "l2", "l3"]):
+        return {"type": "explain_result", "confidence": 0.82}
     if any(keyword in text for keyword in ["当前阶段", "阶段", "项目", "目标", "证据", "skill", "技能"]) or any(
         keyword in text for keyword in ["stage", "project", "skill", "context"]
     ):
@@ -138,23 +146,15 @@ def answer_with_llm(
         str(data["reply"])[:80], len(data.get("action_proposals") or []),
     )
 
-    # 过滤掉非法 action_proposals:下游 save_action_proposals 用 proposal["action_type"]
-    # 直接下标访问,缺少 action_type 会抛 KeyError 触发 500。这里只保留含非空
-    # action_type 的 dict,丢弃 LLM 偶发的畸形 proposal,保证 reply 仍能返回。
-    raw_proposals = data.get("action_proposals") or []
-    cleaned_proposals: list[dict[str, Any]] = []
-    for proposal in raw_proposals:
-        if not isinstance(proposal, dict):
-            continue
-        action_type = proposal.get("action_type")
-        if not action_type:
-            continue
-        cleaned_proposals.append(proposal)
+    cleaned_citations, citation_warnings = normalize_citations(request, data.get("citations", []))
+    cleaned_proposals, proposal_warnings = normalize_action_proposals(
+        request, data.get("action_proposals", [])
+    )
 
     return {
         "assistant_message": str(data["reply"]),
-        "citations": [],
-        "warnings": [],
+        "citations": cleaned_citations,
+        "warnings": citation_warnings + proposal_warnings,
         "action_proposals": cleaned_proposals,
         "llm_used": True,
     }
@@ -172,6 +172,10 @@ def rule_based_fallback(
         answer = explain_result(request, tools)
     elif intent["type"] == "request_run":
         answer = propose_run(request)
+    elif intent["type"] == "request_skill":
+        answer = propose_skill(request)
+    elif intent["type"] == "request_human_confirmation":
+        answer = propose_human_confirmation(request)
     else:
         answer = fallback_answer(request)
     answer["intent"] = intent
@@ -266,6 +270,49 @@ def propose_run(request: ConversationHarnessRequest) -> dict[str, Any]:
     )
     return {
         "assistant_message": "我可以为当前阶段创建一次新的阶段分析任务。该操作需要确认后再执行，不会由对话 Harness 直接写入阶段结果。",
+        "action_proposals": [proposal.to_dict()],
+    }
+
+
+def propose_skill(request: ConversationHarnessRequest) -> dict[str, Any]:
+    skills = [
+        item.get("name")
+        for item in request.available_skills
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
+    selected_skill = next((name for name in skills if name in request.user_message), None)
+    if selected_skill is None and len(skills) == 1:
+        selected_skill = skills[0]
+    if not selected_skill:
+        return {
+            "assistant_message": "请指定要调用的当前阶段 Skill；我会先生成待确认的执行建议。",
+            "warnings": [{"code": "ambiguous_skill_request", "message": "No single Skill was selected."}],
+        }
+    proposal = ConversationActionProposal(
+        action_type="propose_invoke_skill",
+        title=f"调用 {selected_skill}",
+        payload={
+            "skill_name": selected_skill,
+            "goal": request.user_message,
+            "config_version_id": request.config_version_id,
+        },
+        requires_confirmation=True,
+    )
+    return {
+        "assistant_message": f"我可以调用 {selected_skill} 执行当前阶段任务；请确认后再启动。",
+        "action_proposals": [proposal.to_dict()],
+    }
+
+
+def propose_human_confirmation(request: ConversationHarnessRequest) -> dict[str, Any]:
+    proposal = ConversationActionProposal(
+        action_type="propose_request_human_confirmation",
+        title="请求人工确认",
+        payload={"question": request.user_message},
+        requires_confirmation=True,
+    )
+    return {
+        "assistant_message": "我会将该问题创建为待人工确认项，确认后不会自动执行阶段任务。",
         "action_proposals": [proposal.to_dict()],
     }
 

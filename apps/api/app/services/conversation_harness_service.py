@@ -5,13 +5,18 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from hashlib import sha256
 
 from fastapi import HTTPException, status
 
 from src.apps.api.app.agents.conversation_harness.context_builder import (
     ConversationContextBuilder,
 )
-from src.apps.api.app.agents.conversation_harness.contracts import ConversationHarnessResult
+from src.apps.api.app.agents.conversation_harness.contracts import (
+    ConversationHarnessResult,
+    normalize_action_proposals,
+    normalize_citations,
+)
 from src.apps.api.app.agents.conversation_harness.registry import (
     get_conversation_harness_provider,
 )
@@ -26,6 +31,42 @@ def _jsonable(value) -> str:
     """Normalize a value for audit storage so stray datetimes/objects never
     break the execution-log write or the /execution-logs JSON endpoint."""
     return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+
+
+def _audit_context_summary(request) -> dict:
+    """Record reproducibility metadata without retaining prompt content or secrets."""
+    history = request.message_history
+    return {
+        "project_id": request.project_id,
+        "stage_id": request.stage_id,
+        "conversation_id": request.conversation_id,
+        "config_version_id": request.config_version_id,
+        "config_hash": ((request.options.get("settings_snapshot") or {}).get("config_hash")),
+        "message_history": {
+            "count": len(history),
+            "digest": sha256(
+                json.dumps(history, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+        },
+        "latest_stage_result": {
+            "id": (request.latest_stage_result or {}).get("id"),
+            "version_id": (request.latest_stage_result or {}).get("version_id"),
+        },
+        "evidence_ids": [
+            item.get("id") for item in request.evidence_summaries if isinstance(item, dict) and item.get("id")
+        ],
+        "run_event_ids": [
+            item.get("id") for item in request.recent_run_events if isinstance(item, dict) and item.get("id")
+        ],
+        "available_skill_names": [
+            item.get("name") for item in request.available_skills if isinstance(item, dict) and item.get("name")
+        ],
+        "context_limits": {
+            "message_count": len(history),
+            "evidence_count": len(request.evidence_summaries),
+            "run_event_count": len(request.recent_run_events),
+        },
+    }
 
 
 @dataclass
@@ -73,6 +114,13 @@ def invoke_conversation_harness(
         result.conversation_harness_version, result.intent,
         result.warnings, result.raw, result.assistant_message[:120],
     )
+    # Providers may be independently versioned, so enforce the public
+    # context/action boundary again at the service persistence boundary.
+    result.citations, citation_warnings = normalize_citations(request, result.citations)
+    result.action_proposals, proposal_warnings = normalize_action_proposals(
+        request, result.action_proposals
+    )
+    result.warnings.extend(citation_warnings + proposal_warnings)
 
     action_records: list = []
     if result.action_proposals:
@@ -105,6 +153,7 @@ def invoke_conversation_harness(
                 }
                 for record in action_records
             ],
+            citations=list(result.citations),
             harness_warnings=list(result.warnings),
             tool_calls=list(result.tool_calls),
         )
@@ -137,6 +186,7 @@ def invoke_conversation_harness(
             "effects": result.effects,
             "raw": result.raw,
             "warnings": result.warnings,
+            "context_summary": _audit_context_summary(request),
         }),
     )
     return ConversationHarnessInvocation(

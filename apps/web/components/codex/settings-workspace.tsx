@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
   BookOpen,
+  Brain,
   CheckCircle2,
   ChevronLeft,
   ClipboardList,
@@ -11,11 +12,16 @@ import {
   Info,
   Loader2,
   MessageSquare,
+  Plug,
+  PlugZap,
   RotateCcw,
   Send,
   Sparkles,
   Undo2,
+  User,
+  Users,
   Wrench,
+  XCircle,
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -35,6 +41,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { ApiError } from '@/lib/api-error'
 import { DocsSection } from '@/components/codex/docs-section'
@@ -46,8 +53,10 @@ import {
   publishProjectSettings,
   resetProjectSettings,
   saveProjectSettingsDraft,
+  testProjectModelConnection,
 } from '@/lib/api-client'
 import type {
+  ApiModelTestResponse,
   ApiProjectSettings,
   ApiProjectSettingsBundle,
   ApiRunPolicy,
@@ -56,7 +65,7 @@ import type {
   ApiStageSkillProfile,
 } from '@/lib/api-types'
 
-type SectionId = 'models' | 'prompts' | 'skills' | 'policy' | 'docs'
+type SectionId = 'models' | 'prompts' | 'skills' | 'policy' | 'docs' | 'about'
 
 interface SettingsWorkspaceProps {
   projectId?: string
@@ -71,6 +80,7 @@ const SECTION_DEFS: Array<{ id: SectionId; label: string; icon: typeof Sparkles 
   { id: 'skills', label: '阶段 Skills', icon: Wrench },
   { id: 'policy', label: '配置发布', icon: ClipboardList },
   { id: 'docs', label: '使用手册', icon: BookOpen },
+  { id: 'about', label: '关于', icon: Info },
 ]
 
 interface DraftState {
@@ -103,6 +113,7 @@ function clonePublished(settings: ApiProjectSettings): DraftState {
     prompts: settings.prompts.map((prompt) => ({ ...prompt, required_variables: [...prompt.required_variables] })),
     stage_skill_profiles: settings.stage_skill_profiles.map((profile) => ({
       ...profile,
+      enabled_skills: [...profile.enabled_skills],
       enabled_tools: [...profile.enabled_tools],
       enabled_subagents: [...profile.enabled_subagents],
       skill_versions: { ...profile.skill_versions },
@@ -273,8 +284,14 @@ export function SettingsWorkspace({ projectId, projectName, onBack, onDirtyChang
 
   const handlePublish = async () => {
     if (!projectId) return
-    if (!draft.change_reason.trim()) {
-      setErrorMessage('发布前必须填写变更原因。')
+    // Honor the project's own require_change_reason flag: only block when the
+    // operator explicitly allowed empty reasons (False). The back-end
+    // (publish_settings_draft) applies the same flag as the source of truth,
+    // so we mirror it here to avoid a spurious "发布前必须填写变更原因"
+    // prompt when the policy says a reason isn't required.
+    if (draft.run_policy.require_change_reason && !draft.change_reason.trim()) {
+      setErrorMessage('发布前必须填写变更原因：请在「配置发布」标签页填写「本次发布变更原因」。')
+      setSection('policy')
       return
     }
     setPublishing(true)
@@ -401,6 +418,7 @@ export function SettingsWorkspace({ projectId, projectName, onBack, onDirtyChang
                   <ModelsSection
                     models={displayModels}
                     onChange={updateModel}
+                    projectId={projectId}
                 />
               )}
               {section === 'prompts' && (
@@ -444,6 +462,7 @@ export function SettingsWorkspace({ projectId, projectName, onBack, onDirtyChang
                   onLoadVersion={handleLoadVersion}
                 />
               )}
+              {section === 'about' && <AboutSection />}
             </div>
             </ScrollArea>
           )}
@@ -456,20 +475,64 @@ export function SettingsWorkspace({ projectId, projectName, onBack, onDirtyChang
 interface ModelsSectionProps {
   models: DraftState['models']
   onChange: (role: string, patch: Partial<DraftState['models'][number]>) => void
+  projectId?: string
 }
 
-function ModelsSection({ models, onChange }: ModelsSectionProps) {
+type ModelTestState =
+  | { status: 'idle' }
+  | { status: 'pending' }
+  | { status: 'success'; result: ApiModelTestResponse }
+  | { status: 'error'; message: string }
+
+function ModelsSection({ models, onChange, projectId }: ModelsSectionProps) {
+  // 测试结果按 role 分桶，键稳定且随 role 列表重排自动跟随。
+  const [testStates, setTestStates] = useState<Record<string, ModelTestState>>({})
+
+  const runTest = async (model: DraftState['models'][number]) => {
+    if (!projectId) return
+    setTestStates((prev) => ({ ...prev, [model.role]: { status: 'pending' } }))
+    try {
+      const result = await testProjectModelConnection(projectId, {
+        model_name: model.model_name,
+        base_url: model.base_url ?? '',
+        api_key: model.api_key ?? '',
+        reasoning_mode: model.reasoning_mode ?? true,
+      })
+      setTestStates((prev) => ({
+        ...prev,
+        [model.role]: result.ok
+          ? { status: 'success', result }
+          : { status: 'error', message: result.message || '测试失败' },
+      }))
+    } catch (testError) {
+      const message =
+        testError instanceof ApiError
+          ? testError.message
+          : testError instanceof Error
+            ? testError.message
+            : '测试失败'
+      setTestStates((prev) => ({ ...prev, [model.role]: { status: 'error', message } }))
+    }
+  }
+
+  const resetTest = (role: string) => {
+    setTestStates((prev) => {
+      if (!(role in prev)) return prev
+      const next = { ...prev }
+      delete next[role]
+      return next
+    })
+  }
+
   return (
     <section className="space-y-3">
       <header className="space-y-1">
         <h2 className="text-sm font-medium">模型配置</h2>
-        <p className="text-xs text-muted-foreground">
-          按兼容 OpenAI 的 Chat Completions API 配置。这里只保留模型名称、Base URL、Key、Think 模式。
-        </p>
       </header>
       {models.map((model) => {
         // reasoning_mode 缺省 True:旧 settings 未持久化该字段时,默认保留推理能力。
         const reasoningMode = model.reasoning_mode ?? true
+        const testState = testStates[model.role] ?? { status: 'idle' }
         return (
         <article
           key={model.role}
@@ -477,18 +540,25 @@ function ModelsSection({ models, onChange }: ModelsSectionProps) {
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] uppercase">
-                {model.role}
-              </span>
               <h3 className="text-sm font-medium">{labelForRole(model.role)}</h3>
-            </div>
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Switch
-                checked={model.enabled}
-                onCheckedChange={(value) => onChange(model.role, { enabled: value })}
+              <ModelTestButton
+                model={model}
+                state={testState}
+                disabled={!projectId}
+                onRun={() => runTest(model)}
+                onReset={() => resetTest(model.role)}
               />
-              {model.enabled ? '启用' : '停用'}
-            </label>
+            </div>
+            <div className="flex items-center gap-2">
+              <BrainToggle
+                enabled={reasoningMode}
+                onChange={(value) => onChange(model.role, { reasoning_mode: value })}
+              />
+              <PlugToggle
+                enabled={model.enabled}
+                onChange={(value) => onChange(model.role, { enabled: value })}
+              />
+            </div>
           </div>
           <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
             <Field label="模型名称" className="min-w-0">
@@ -518,26 +588,132 @@ function ModelsSection({ models, onChange }: ModelsSectionProps) {
               />
             </Field>
           </div>
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-dashed border-border/70 bg-muted/20 px-3 py-2">
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="text-xs font-medium text-foreground">Think 模式（推理模式）</div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                开启时模型可输出 {`<think>…</think>`} 推理链后再给最终答案（适合 MiniMax-M3 / DeepSeek-R1 / QwQ 等推理模型）。
-                关闭时模型直接给最终答案，不再输出思考过程。
-              </p>
-            </div>
-            <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-              <Switch
-                checked={reasoningMode}
-                onCheckedChange={(value) => onChange(model.role, { reasoning_mode: value })}
-              />
-              {reasoningMode ? '开启' : '关闭'}
-            </label>
-          </div>
         </article>
         )
       })}
     </section>
+  )
+}
+
+interface ModelTestButtonProps {
+  model: DraftState['models'][number]
+  state: ModelTestState
+  disabled?: boolean
+  onRun: () => void
+  onReset: () => void
+}
+
+function ModelTestButton({ model, state, disabled, onRun, onReset }: ModelTestButtonProps) {
+  const canRun = Boolean(
+    model.model_name && (model.base_url ?? '') && (model.api_key ?? '')
+  )
+  const tooltipText =
+    state.status === 'pending'
+      ? '测试中…'
+      : state.status === 'success'
+        ? `${state.result.message}（点击重新测试）`
+        : state.status === 'error'
+          ? `${state.message}（点击重新测试）`
+          : canRun
+            ? '测试模型是否可用'
+            : '请先填写模型名称、Base URL 和 Key'
+
+  const icon =
+    state.status === 'pending' ? (
+      <Loader2 className="size-3.5 animate-spin" />
+    ) : state.status === 'success' ? (
+      <CheckCircle2 className="size-3.5 text-emerald-600" />
+    ) : state.status === 'error' ? (
+      <XCircle className="size-3.5 text-destructive" />
+    ) : (
+      <PlugZap className="size-3.5" />
+    )
+
+  const buttonClass = cn(
+    'inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[11px] transition-colors',
+    state.status === 'idle'
+      ? 'border-border text-muted-foreground hover:bg-muted hover:text-foreground'
+      : 'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground'
+  )
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className={buttonClass}
+          disabled={disabled || state.status === 'pending' || !canRun}
+          onClick={state.status === 'idle' || state.status === 'pending' ? onRun : onReset}
+          aria-label={`测试 ${model.role} 模型`}
+        >
+          {icon}
+          <span className="sr-only">测试</span>
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{tooltipText}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+interface PlugToggleProps {
+  enabled: boolean
+  onChange: (value: boolean) => void
+}
+
+function PlugToggle({ enabled, onChange }: PlugToggleProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={enabled ? '停用模型' : '启用模型'}
+          onClick={() => onChange(!enabled)}
+          className={cn(
+            'flex h-6 w-6 items-center justify-center rounded-md border transition-colors',
+            enabled
+              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20'
+              : 'border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground'
+          )}
+        >
+          <Plug className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{enabled ? '已启用（点击拔出停用）' : '已停用（点击插回启用）'}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+interface BrainToggleProps {
+  enabled: boolean
+  onChange: (value: boolean) => void
+}
+
+function BrainToggle({ enabled, onChange }: BrainToggleProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={enabled ? '关闭 Think 模式' : '开启 Think 模式'}
+          onClick={() => onChange(!enabled)}
+          className={cn(
+            'flex h-6 w-6 items-center justify-center rounded-md border transition-colors',
+            enabled
+              ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 hover:bg-violet-500/20'
+              : 'border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground'
+          )}
+        >
+          <Brain className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>
+        {enabled ? 'Think 模式已开启（点击关闭，直接给最终答案）' : 'Think 模式已关闭（点击开启，输出推理链）'}
+      </TooltipContent>
+    </Tooltip>
   )
 }
   interface PromptsSectionProps {
@@ -616,90 +792,140 @@ interface SkillsSectionProps {
 }
 
 function SkillsSection({ profiles, skillOptions, onChange, onToggleTool, onToggleSubagent }: SkillsSectionProps) {
+  // 按 eligibleSkills 的注册顺序去重合并多个已启用 Skill 的工具/子代理允许集，
+  // 作为该阶段可勾选项的并集来源。空启用时返回空数组（由调用方渲染空态提示）。
+  const unionAllowed = (
+    enabledSkillNames: string[],
+    eligibleSkills: ApiSkillOption[],
+    key: 'allowed_tools' | 'allowed_subagents'
+  ): string[] => {
+    const seen = new Set<string>()
+    for (const skill of eligibleSkills) {
+      if (!enabledSkillNames.includes(skill.name)) continue
+      for (const item of skill[key]) seen.add(item)
+    }
+    return Array.from(seen)
+  }
+
   return (
     <section className="space-y-3">
       <header className="space-y-1">
         <h2 className="text-sm font-medium">阶段 Skill 配置</h2>
         <p className="text-xs text-muted-foreground">
-          为每个阶段选择主 Skill，启用范围须在 Skill 允许集合内。
+          每个阶段可启用多个 Skill（点击右上角插座图标插回/拔出）；工具与子代理展示所有已启用 Skill 的并集。全部停用时由阶段 Harness 兜底处理。
         </p>
       </header>
       {profiles.map((profile) => {
-        const currentSkill = skillOptions.find((s) => s.name === profile.primary_skill)
         const stageSuffix = profile.stage_id.split('-').slice(-1).join('-') || ''
         const eligibleSkills = skillOptions.filter((s) => s.stage_suffix === `stage-${stageSuffix}` || s.stage_suffix === 'unknown')
         const stageLabel = STAGE_LABELS[stageSuffix] ?? profile.stage_id
+        const enabledSkills = profile.enabled_skills
+        const enabledDefs = eligibleSkills.filter((s) => enabledSkills.includes(s.name))
+        const orphanEnabled = enabledSkills.filter(
+          (name) => !eligibleSkills.some((s) => s.name === name)
+        )
+        const unionTools = unionAllowed(enabledSkills, eligibleSkills, 'allowed_tools')
+        const unionSubagents = unionAllowed(enabledSkills, eligibleSkills, 'allowed_subagents')
+
+        const toggleSkill = (skill: ApiSkillOption) => {
+          const isEnabled = enabledSkills.includes(skill.name)
+          const nextEnabled = isEnabled
+            ? enabledSkills.filter((name) => name !== skill.name)
+            : [...enabledSkills, skill.name]
+          // primary_skill 由「第一个已启用 Skill」（按 eligible 顺序）派生；
+          // 全停用时回退到当前 primary_skill，保持后端校验通过（不置空）。
+          const enabledInOrder = eligibleSkills.filter((s) => nextEnabled.includes(s.name))
+          const nextPrimary = enabledInOrder[0]?.name ?? profile.primary_skill
+          // 启用时若缺少版本号则补 'mvp-v1'；停用时不动版本号。
+          const nextSkillVersions = isEnabled
+            ? profile.skill_versions
+            : {
+                ...profile.skill_versions,
+                [skill.name]: profile.skill_versions[skill.name] ?? 'mvp-v1',
+              }
+          onChange(profile.stage_id, {
+            enabled_skills: nextEnabled,
+            primary_skill: nextPrimary,
+            skill_versions: nextSkillVersions,
+          })
+        }
 
         return (
           <article key={profile.stage_id} className="rounded-lg border border-border bg-card p-3 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="space-y-0.5">
                 <div className="text-sm font-medium" title={profile.stage_id}>{stageLabel}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  已启用 {enabledDefs.length} 个 Skill
+                  {enabledDefs.length > 0 && `：${enabledDefs.map((s) => SKILL_LABELS[s.name] ?? s.name).join('、')}`}
+                </div>
               </div>
-              <FieldWithInfo
-                label="触发方式"
-                info="控制该阶段 Skill 何时执行。「手动」需点运行按钮才执行；「输入就绪」在依赖数据备齐后自动执行；「自动」在阶段进入时立即执行。"
-              >
-                <select
-                  className="h-8 rounded-md border border-input bg-background px-2 text-xs"
-                  value={profile.auto_run_condition}
-                  onChange={(event) =>
-                    onChange(profile.stage_id, { auto_run_condition: event.target.value })
-                  }
-                >
-                  <option value="manual">手动</option>
-                  <option value="on_inputs_ready">输入就绪</option>
-                  <option value="auto">自动</option>
-                </select>
-              </FieldWithInfo>
             </div>
 
             <div className="mt-3">
-              <Field label="主 Skill">
+              <Field label="启用 Skill">
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {eligibleSkills.map((skill) => {
-                    const selected = skill.name === profile.primary_skill
+                    const isEnabled = enabledSkills.includes(skill.name)
+                    const isPrimary = skill.name === profile.primary_skill
                     return (
-                      <button
+                      <div
                         key={skill.name}
-                        type="button"
-                        aria-pressed={selected}
-                        onClick={() =>
-                          onChange(profile.stage_id, {
-                            primary_skill: skill.name,
-                            enabled_tools: [...skill.allowed_tools],
-                            enabled_subagents: [...skill.allowed_subagents],
-                            skill_versions: {
-                              ...profile.skill_versions,
-                              [skill.name]: profile.skill_versions[skill.name] ?? 'mvp-v1',
-                            },
-                          })
-                        }
                         className={cn(
-                          'relative rounded-md border p-2 text-left transition-colors',
-                          selected
+                          'relative rounded-md border p-2 transition-colors',
+                          isEnabled
                             ? 'border-primary bg-primary/5'
                             : 'border-border bg-background hover:border-primary/50'
                         )}
                       >
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-medium">
-                            {SKILL_LABELS[skill.name] ?? skill.name}
-                          </span>
-                          {selected && <CheckCircle2 className="h-3.5 w-3.5 text-primary" />}
+                        <div className="flex items-start justify-between gap-1">
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs font-medium">
+                                {SKILL_LABELS[skill.name] ?? skill.name}
+                              </span>
+                              {isPrimary && isEnabled && (
+                                <span className="rounded bg-primary/15 px-1 text-[9px] font-medium text-primary">
+                                  主
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-muted-foreground">
+                              {skill.description}
+                            </div>
+                            <div className="font-mono text-[10px] text-muted-foreground/70">
+                              {skill.name}
+                            </div>
+                          </div>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={isEnabled}
+                                aria-label={isEnabled ? `停用 ${SKILL_LABELS[skill.name] ?? skill.name}` : `启用 ${SKILL_LABELS[skill.name] ?? skill.name}`}
+                                onClick={() => toggleSkill(skill)}
+                                className={cn(
+                                  'flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors',
+                                  isEnabled
+                                    ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20'
+                                    : 'border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground'
+                                )}
+                              >
+                                <Plug className="size-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {isEnabled ? '已启用（点击拔出停用）' : '已停用（点击插回启用）'}
+                            </TooltipContent>
+                          </Tooltip>
                         </div>
-                        <div className="mt-0.5 text-[11px] text-muted-foreground">
-                          {skill.description}
-                        </div>
-                        <div className="mt-1 font-mono text-[10px] text-muted-foreground/70">
-                          {skill.name}
-                        </div>
-                      </button>
+                      </div>
                     )
                   })}
-                  {currentSkill && !eligibleSkills.includes(currentSkill) && (
+                  {orphanEnabled.length > 0 && (
                     <div className="rounded-md border border-dashed border-border p-2 text-[11px] text-muted-foreground">
-                      当前 {SKILL_LABELS[currentSkill.name] ?? currentSkill.name} 不在可选列表
+                      当前启用的 {orphanEnabled.map((n) => SKILL_LABELS[n] ?? n).join('、')} 不在该阶段可选列表
                     </div>
                   )}
                 </div>
@@ -709,10 +935,10 @@ function SkillsSection({ profiles, skillOptions, onChange, onToggleTool, onToggl
             <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
               <FieldWithInfo
                 label="工具"
-                info="勾选该阶段 Skill 允许的工具。工具是 Skill 调用的能力单元（如文档解析、风险识别）；未勾选的项不会在该阶段执行，但 Skill 仍可访问其默认允许集，仅不向 Harness 暴露。"
+                info="勾选该阶段已启用 Skill 允许的工具并集。工具是 Skill 调用的能力单元（如文档解析、风险识别）；未勾选的项不会在该阶段执行。全部停用时该阶段不会执行有效工具，由 Harness 兜底。"
               >
                 <div className="flex flex-wrap gap-1.5">
-                  {(currentSkill?.allowed_tools ?? []).map((tool) => {
+                  {unionTools.map((tool) => {
                     const enabled = profile.enabled_tools.includes(tool)
                     return (
                       <label
@@ -734,20 +960,22 @@ function SkillsSection({ profiles, skillOptions, onChange, onToggleTool, onToggl
                       </label>
                     )
                   })}
-                  {!currentSkill && (
-                    <span className="text-[11px] text-muted-foreground">请先选择主 Skill</span>
+                  {enabledDefs.length === 0 && (
+                    <span className="text-[11px] text-amber-600">
+                      未启用任何 Skill，该阶段不会执行有效工具
+                    </span>
                   )}
-                  {currentSkill && (currentSkill.allowed_tools ?? []).length === 0 && (
-                    <span className="text-[11px] text-muted-foreground">该 Skill 无可用工具</span>
+                  {enabledDefs.length > 0 && unionTools.length === 0 && (
+                    <span className="text-[11px] text-muted-foreground">已启用 Skill 无可用工具</span>
                   )}
                 </div>
               </FieldWithInfo>
               <FieldWithInfo
                 label="子代理"
-                info="勾选该阶段 Skill 允许的子代理（Sub-agent）。子代理负责执行 Skill 的细分任务（如风险复核、价值复核）；未勾选的项不参与本轮执行，但 Skill 默认允许集不受影响。"
+                info="勾选该阶段已启用 Skill 允许的子代理（Sub-agent）并集。子代理负责执行 Skill 的细分任务（如风险复核、价值复核）；未勾选的项不参与本轮执行。"
               >
                 <div className="flex flex-wrap gap-1.5">
-                  {(currentSkill?.allowed_subagents ?? []).map((subagent) => {
+                  {unionSubagents.map((subagent) => {
                     const enabled = profile.enabled_subagents.includes(subagent)
                     return (
                       <label
@@ -769,11 +997,13 @@ function SkillsSection({ profiles, skillOptions, onChange, onToggleTool, onToggl
                       </label>
                     )
                   })}
-                  {!currentSkill && (
-                    <span className="text-[11px] text-muted-foreground">请先选择主 Skill</span>
+                  {enabledDefs.length === 0 && (
+                    <span className="text-[11px] text-amber-600">
+                      未启用任何 Skill，该阶段不会执行有效子代理
+                    </span>
                   )}
-                  {currentSkill && (currentSkill.allowed_subagents ?? []).length === 0 && (
-                    <span className="text-[11px] text-muted-foreground">该 Skill 无可用子代理</span>
+                  {enabledDefs.length > 0 && unionSubagents.length === 0 && (
+                    <span className="text-[11px] text-muted-foreground">已启用 Skill 无可用子代理</span>
                   )}
                 </div>
               </FieldWithInfo>
@@ -983,4 +1213,68 @@ function labelForRole(role: string): string {
   if (role === 'vision') return '视觉解析'
   if (role === 'judge') return 'Judge 校准'
   return role
+}
+
+const APP_VERSION = '0.1.0'
+
+interface AboutItem {
+  icon: typeof User
+  label: string
+  value: string
+}
+
+const ABOUT_ITEMS: AboutItem[] = [
+  { icon: User, label: '作者', value: '贾承斌' },
+  { icon: Users, label: '指导老师', value: '刘璘' },
+]
+
+function AboutSection() {
+  return (
+    <section className="space-y-3">
+      <header className="space-y-1">
+        <h2 className="text-sm font-medium">关于</h2>
+        <p className="text-xs text-muted-foreground">
+          ai-ReqEval · 银行 GenAI 场景前置评估研究与工具平台
+        </p>
+      </header>
+
+      <article className="rounded-lg border border-border bg-card p-4 shadow-xs">
+        <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {ABOUT_ITEMS.map((item) => {
+            const Icon = item.icon
+            return (
+              <div
+                key={item.label}
+                className="flex items-center gap-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2.5"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <Icon className="size-4" />
+                </span>
+                <div className="min-w-0 space-y-0.5">
+                  <dt className="text-[11px] text-muted-foreground">{item.label}</dt>
+                  <dd className="truncate text-sm font-medium text-foreground">{item.value}</dd>
+                </div>
+              </div>
+            )
+          })}
+        </dl>
+
+        <div className="mt-3 flex items-center gap-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Info className="size-4" />
+          </span>
+          <div className="min-w-0 space-y-0.5">
+            <div className="text-[11px] text-muted-foreground">版本号</div>
+            <div className="font-mono text-sm font-medium text-foreground">v{APP_VERSION}</div>
+          </div>
+        </div>
+      </article>
+
+      <article className="rounded-lg border border-border bg-card p-4 text-xs leading-relaxed text-muted-foreground shadow-xs">
+        <p>
+          本平台用于在银行 GenAI 场景立项前，评估该场景是否应当推进。当前研究对象为贷后风险监测与预警评估。平台产出可审计的风险、价值与技术证据，不替代生产审批或业务决策。
+        </p>
+      </article>
+    </section>
+  )
 }

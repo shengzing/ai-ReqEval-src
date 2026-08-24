@@ -3,6 +3,7 @@
 import { ChevronDown, ChevronRight } from 'lucide-react'
 
 import type { EvidenceItem } from '@/lib/types'
+import type { FileParseStateMap } from '@/lib/file-parse-lifecycle'
 import type { EvidenceSuggestionInput } from './evidence-types'
 import { EvidenceItemRow } from './evidence-item-row'
 
@@ -13,7 +14,13 @@ interface EvidenceGroupProps {
   highlightedEvidenceName?: string
   onToggleGroup: (group: string) => void
   onParseFile?: (fileId: string) => Promise<void> | void
+  fileParseStates: FileParseStateMap
   onVisionParseFile?: (fileId: string) => Promise<void> | void
+  onReviewRelevance?: (
+    fileId: string,
+    decision: 'related' | 'unrelated' | 'rejected',
+    reason: string,
+  ) => Promise<void> | void
   onAskEvidenceDetail?: (prompt: string) => Promise<void> | void
   onCreateEvidenceSuggestion?: (input: EvidenceSuggestionInput) => Promise<void> | void
   onPreviewResource?: (item: EvidenceItem) => void
@@ -26,7 +33,9 @@ export function EvidenceGroup({
   highlightedEvidenceName,
   onToggleGroup,
   onParseFile,
+  fileParseStates,
   onVisionParseFile,
+  onReviewRelevance,
   onAskEvidenceDetail,
   onCreateEvidenceSuggestion,
   onPreviewResource,
@@ -54,7 +63,9 @@ export function EvidenceGroup({
               item={item}
               highlighted={item.name.includes(highlightedEvidenceName ?? '') && Boolean(highlightedEvidenceName)}
               onParseFile={onParseFile}
+              parseState={item.sourceFileId ? fileParseStates[item.sourceFileId] : undefined}
               onVisionParseFile={onVisionParseFile}
+              onReviewRelevance={onReviewRelevance}
               onAskEvidenceDetail={onAskEvidenceDetail}
               onCreateEvidenceSuggestion={onCreateEvidenceSuggestion}
               onPreviewResource={onPreviewResource}

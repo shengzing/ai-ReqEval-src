@@ -18,6 +18,7 @@ from src.apps.api.app.agents.harness.adapters.llm_adapter import LLMAdapter
 from src.apps.api.app.agents.harness.adapters.permission_adapter import PermissionAdapter
 from src.apps.api.app.agents.harness.adapters.tool_adapter import ToolAdapter
 from src.apps.api.app.agents.harness.contracts import (
+    build_skipped_subagent_audits,
     HarnessRequest,
     HarnessResult,
     HarnessToolCall,
@@ -147,6 +148,7 @@ class HoneycombV1Runtime:
         tool_results: dict[str, dict[str, Any]] = {}
         tool_result_items: list[dict[str, Any]] = []
         tool_failures: list[dict[str, Any]] = []
+        tool_skips: list[dict[str, Any]] = []
 
         for tool_name in plan["tool_names"]:
             # before_tool hook（permission check 之前，观察所有尝试含被拒）
@@ -159,18 +161,17 @@ class HoneycombV1Runtime:
             traces.append({"event": "tool.started", "payload": {"tool_name": tool_name}})
 
             call = HarnessToolCall(tool_name=tool_name, reason="honeycomb.plan")
-            perm = self._permission_adapter.check(request, call)
-            if not perm.allowed:
-                failure_dict = self._permission_adapter.build_denied_result(call, perm)
-                result = HarnessToolResult(
-                    tool_name=tool_name,
-                    success=False,
-                    summary=failure_dict["detail"],
-                    failure=failure_dict,
-                    audit={"reason": call.reason, "payload": dict(call.payload)},
-                )
-            else:
-                result = self._tool_adapter.invoke(request, call)
+            # ToolAdapter is the one permission-enforcing execution boundary
+            # for every provider.  Honeycomb keeps its own adapter only for
+            # compatibility with injected policies by attaching it to this
+            # request-local executor at construction time.
+            result = self._tool_adapter.invoke(
+                request,
+                call,
+                llm_client=llm_adapter.client,
+                permission_adapter=self._permission_adapter,
+                provider="honeycomb-v1",
+            )
 
             if result.success:
                 item = result.to_result_item()
@@ -180,6 +181,18 @@ class HoneycombV1Runtime:
                     {
                         "event": "tool.completed",
                         "payload": {"tool_name": tool_name, "summary": result.summary},
+                    }
+                )
+            elif result.status == "skipped_missing_input":
+                tool_skips.append(result.to_skip_item())
+                traces.append(
+                    {
+                        "event": "tool.skipped",
+                        "payload": {
+                            "tool_name": tool_name,
+                            "reason": result.status,
+                            "audit": result.audit,
+                        },
                     }
                 )
             else:
@@ -205,19 +218,42 @@ class HoneycombV1Runtime:
                 )
             )
 
+        no_completed_tools = bool(tool_skips) and not bool(tool_results)
         decision = {
-            "should_continue": not tool_failures,
+            "should_continue": not tool_failures and not no_completed_tools,
             "requires_human": bool(tool_failures),
             "summary": (
                 "Honeycomb executed enabled tools."
-                if not tool_failures
+                if not tool_failures and not no_completed_tools
+                else "Honeycomb skipped all tools because required input is unavailable."
+                if no_completed_tools
                 else "Honeycomb completed with tool failures."
             ),
-            "confidence": 0.8 if not tool_failures else 0.4,
+            "confidence": 0.8 if not tool_failures and not no_completed_tools else 0.0 if no_completed_tools else 0.4,
             "source": "honeycomb-fallback" if tool_failures else plan["source"],
             "notes": [item["detail"] for item in tool_failures],
         }
         traces.append({"event": "honeycomb.decision", "payload": decision})
+
+        # Honeycomb v1 intentionally does not dispatch generic subagents.
+        # Keep that capability decision explicit so an enabled subagent cannot
+        # look as if it silently disappeared from the audit chain.
+        subagent_audits = build_skipped_subagent_audits(
+            request,
+            provider="honeycomb-v1",
+            reason="Honeycomb v1 当前仅执行项目工具，尚未实现通用子代理派发。",
+        )
+        if subagent_audits:
+            traces.append(
+                {
+                    "event": "subagents.skipped",
+                    "payload": {
+                        "provider": "honeycomb-v1",
+                        "count": len(subagent_audits),
+                        "reason": "provider_subagent_unsupported",
+                    },
+                }
+            )
 
         # after_harness hook
         traces.extend(
@@ -239,10 +275,12 @@ class HoneycombV1Runtime:
             tool_results=tool_results,
             tool_result_items=tool_result_items,
             tool_failures=tool_failures,
-            synthesized_payload={"source": "tool_results"},
+            tool_skips=tool_skips,
+            synthesized_payload={"source": "skipped_missing_input", "formal_result": False} if no_completed_tools else {"source": "tool_results"},
             validation_issues=[],
             quality_scores={},
             subagent_results=[],
+            subagent_audits=subagent_audits,
             autoresearch_record_ids=[],
             traces=traces,
             effects=[],

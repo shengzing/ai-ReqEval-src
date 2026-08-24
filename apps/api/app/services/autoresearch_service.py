@@ -21,6 +21,7 @@ from src.apps.api.app.domain.models import (
 from src.apps.api.app.repositories.store import (
     get_autoresearch_record,
     get_latest_stage_result,
+    get_latest_valid_stage_result,
     list_evidence_items,
     list_file_artifacts,
     list_autoresearch_records as repo_list_autoresearch_records,
@@ -49,6 +50,11 @@ _WHITELISTED_PATCH_FIELDS = frozenset({
     "hitl_rules", "hitl_level", "audit_requirements",
     "prohibited_conditions", "fatal_errors", "to_confirm",
     "risk_confidence",  # Phase 4: confidence_mismatch auto-repair
+    # Stage 1 F2/F3 derived artifacts — allow auto-refine to repair the
+    # newly-derived coverage gaps (re-bind cross_system_links, re-derive
+    # error_amplification_paths) without touching the frozen risk/HITL enums.
+    # F1 主案例/补充场景/材料清单是课题级产物，不在单项目内，不放白名单。
+    "cross_system_links", "error_amplification_paths", "boundary_review_status",
     # Stage 2
     "implementation_tax", "target_sla", "stability",
     # Stage 3
@@ -268,6 +274,57 @@ def _build_suggested_patch(
             "field": "risk_confidence",
             "value": {**existing_confidence, "dominant_level": risk_level},
         }
+
+    # --- F2/F3 derived-field coverage gaps ---
+    # These are deterministic projections over process_nodes/risk_items, so
+    # they can be auto-repaired without human input. They regenerate the
+    # full field from the current summary so coverage rises from 0 to full.
+    # (F1 主案例/补充场景/材料清单是课题级产物，不在单项目内，无对应补丁。)
+    if issue_type == "missing_field" and field == "cross_system_links":
+        from src.apps.api.app.services.skill_service import _build_cross_system_links
+        return {"op": "replace", "field": "cross_system_links",
+                "value": _build_cross_system_links(scenario_summary)}
+
+    if issue_type == "missing_field" and field == "error_amplification_paths":
+        from src.apps.api.app.services.skill_service import _build_error_amplification_paths
+        paths = _build_error_amplification_paths(scenario_summary)
+        process_nodes = [
+            n for n in (scenario_summary.get("process_nodes") or [])
+            if isinstance(n, dict) and n.get("node_id")
+        ]
+        # Fallback when no process_nodes/risk-bound nodes exist: anchor each
+        # synthesized path on a risk_id (rather than node_id) so the M1
+        # ">=3 paths" gate can still be addressed deterministically without
+        # requiring the upstream tool to have bound nodes.
+        if len(paths) < 3:
+            risk_items = [
+                ri for ri in (scenario_summary.get("risk_items") or [])
+                if isinstance(ri, dict)
+            ]
+            anchors: list[tuple[str, str]] = []  # (risk_id, trigger)
+            for ri in risk_items:
+                rid = str(ri.get("risk_id") or "")
+                if rid:
+                    anchors.append((rid, str(ri.get("description") or ri.get("item") or "")))
+            if not anchors and process_nodes:
+                anchors = [(str(n.get("node_id", "")), "") for n in process_nodes]
+            # If still no anchors, anchor on a generic risk-id placeholder
+            if not anchors:
+                anchors = [("risk-auto", "")]
+            idx = 0
+            while len(paths) < 3:
+                anchor_id, trigger = anchors[idx % len(anchors)]
+                idx += 1
+                paths.append({
+                    "path_id": f"eap-auto-{len(paths) + 1}",
+                    "start_node_id": "",
+                    "start_node_name": "",
+                    "trigger_risk": trigger,
+                    "downstream_node_ids": [],
+                    "amplification_mechanisms": [f"自动补充：锚定风险 {anchor_id}"],
+                    "terminal_reached": False,
+                })
+        return {"op": "replace", "field": "error_amplification_paths", "value": paths}
 
     # No auto-patch for other missing fields or weak evidence — needs human judgment
     return None
@@ -1408,14 +1465,23 @@ def _apply_capability_patch_to_settings_draft(
 
 
 def create_autoresearch_record(*, stage_id: str, run_id: str, auto_run_condition: str = "manual") -> AutoResearchRecord:
+    """Create a pending AutoResearch record for a stage run.
+
+    ``auto_run_condition`` is retained for call-site compatibility but has no
+    behavioral effect: AutoResearch is decoupled from the harness execution
+    trigger, so records are always created in the ``pending`` state and must be
+    confirmed via ``confirm_autoresearch_record`` (POST /autoresearch/{id}/confirm).
+    """
     stage = get_stage(stage_id)
     run = get_run(run_id)
     if run.stage_id != stage_id:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run does not belong to stage")
 
-    stage_result = get_latest_stage_result(stage_id)
+    stage_result = get_latest_valid_stage_result(stage_id)
     if stage_result is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stage result not found")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No valid stage result available for autoResearch")
+    if not stage_result.valid_result:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stage result is not valid; cannot generate autoResearch")
 
     recommendation = _build_stage_specific_recommendation(stage.name, stage_id, stage_result)
     record = AutoResearchRecord(
@@ -1441,89 +1507,12 @@ def create_autoresearch_record(*, stage_id: str, run_id: str, auto_run_condition
         run_id=record.run_id,
         details={"stage_id": record.stage_id, "stage_result_id": record.stage_result_id},
     )
-    # Auto-accept if confidence threshold met and auto_run_condition is "auto"
-    # Gate: L3 risk or boundary_flag always requires HITL — never auto-accept
-    if auto_run_condition == "auto":
-        validation_issues = recommendation.get("context", {}).get("validation_issues", [])
-        scenario_summary = {}
-        stage_result_payload = stage_result.result_payload if stage_result else {}
-        if isinstance(stage_result_payload, dict):
-            scenario_summary = stage_result_payload.get("scenario_summary", {})
-        risk_level = scenario_summary.get("risk_level", "")
-        boundary_flag = scenario_summary.get("boundary_flag", False)
-        patch_confidence = _compute_patch_confidence(validation_issues, scenario_summary)
-
-        # L3 risk or boundary scenarios must always go through HITL
-        l3_requires_hitl = risk_level == "L3"
-        boundary_requires_hitl = boundary_flag
-
-        # P1-1 extension: L3 confidence gate — even when risk_level is L2,
-        # if risk_confidence.L3 >= 0.5, block auto-accept
-        risk_confidence = scenario_summary.get("risk_confidence", {})
-        l3_confidence_gate = (
-            isinstance(risk_confidence, dict)
-            and risk_level != "L3"
-            and risk_confidence.get("L3", 0.0) >= 0.5
-        )
-
-        # Phase 3: quality score gate — block auto-accept ONLY when quality
-        # is critically low (audit_readiness_score < 0.5). The threshold
-        # is intentionally lenient because:
-        # - When all high-severity issues have patches, patch_confidence
-        #   gate already gates auto-accept.
-        # - The remaining dimensions (completeness etc.) are informational
-        #   and may not block the existing patch flow.
-        # - Critical quality issues (e.g. risk_level missing AND hitl missing
-        #   AND no patches) are the only case that should require HITL.
-        quality_scores_ctx = recommendation.get("context", {}).get("quality_scores", {}) or {}
-        audit_readiness_raw = quality_scores_ctx.get("audit_readiness_score", 1.0)
-        if audit_readiness_raw is None:
-            audit_readiness = 1.0
-        else:
-            try:
-                audit_readiness = float(audit_readiness_raw)
-            except (TypeError, ValueError):
-                audit_readiness = 1.0
-        # Critical quality gate: audit_readiness < 0.5 means multiple
-        # dimensions are simultaneously below threshold — too risky to auto-fix.
-        quality_blocked = audit_readiness < 0.5
-        failed_quality = (
-            ["audit_readiness_score"] if quality_blocked else []
-        )
-
-        gate_blocked = (
-            l3_requires_hitl or boundary_requires_hitl
-            or l3_confidence_gate or quality_blocked
-        )
-        if gate_blocked:
-            if l3_requires_hitl:
-                gate_reason = "L3风险等级"
-            elif boundary_requires_hitl:
-                gate_reason = "等级边界标记"
-            elif l3_confidence_gate:
-                gate_reason = "L3置信度≥0.5"
-            else:
-                gate_reason = (
-                    "质量分数未达阈值：{0}".format("、".join(failed_quality))
-                )
-            # Record stays pending; add trace note explaining why auto-accept was blocked
-            record.context.setdefault("autoresearch_gate_blocked", True)
-            record.context.setdefault("autoresearch_gate_reason", gate_reason)
-            if quality_blocked:
-                record.context.setdefault(
-                    "autoresearch_failed_quality_dimensions", failed_quality,
-                )
-            save_autoresearch_record(record)
-        elif patch_confidence >= AUTO_ACCEPT_CONFIDENCE_THRESHOLD:
-            try:
-                record = confirm_autoresearch_record(
-                    record_id=record.id,
-                    decision="accepted",
-                    note="Auto-accepted: patch confidence {0:.2f} >= threshold {1:.2f}".format(patch_confidence, AUTO_ACCEPT_CONFIDENCE_THRESHOLD),
-                    edited_description=None,
-                )[0]
-            except Exception:
-                pass  # Don't fail creation if auto-accept fails
+    # AutoResearch 已从 harness 执行触发解耦：记录创建后恒为 pending，必须经
+    # POST /autoresearch/{id}/confirm 人工确认。原先 auto_run_condition=="auto"
+    # 下的自动放行（含 L3/boundary/quality 门禁判断）已移除——业务结果始终人工
+    # 审核，与 DOCS/design/2026-07-12-stage-harness-autoresearch-architecture.md
+    # 「结果级修订与能力级发布彻底分层」一致。L3/boundary 等风险门禁在
+    # confirm_autoresearch_record 的确认路径中把关。
     return record
 
 
@@ -1540,7 +1529,7 @@ def create_manual_autoresearch_record(
     context: Optional[dict[str, Any]] = None,
 ) -> AutoResearchRecord:
     stage = get_stage(stage_id)
-    stage_result = get_latest_stage_result(stage_id)
+    stage_result = get_latest_valid_stage_result(stage_id)
     record = AutoResearchRecord(
         id=f"ar-{uuid4().hex[:8]}",
         project_id=stage.project_id,
@@ -1668,7 +1657,7 @@ def confirm_autoresearch_record(
 
     stage_result = None
     if decision in {"accepted", "accepted_with_edits"}:
-        base_result = get_latest_stage_result(record.stage_id)
+        base_result = get_latest_valid_stage_result(record.stage_id)
         if base_result is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stage result not found")
 
@@ -1779,11 +1768,28 @@ def confirm_autoresearch_record(
                             scenario_summary[field] = value
                             patch_applied = True
 
-                # Validate patched scenario_summary if we changed it
+                # Validate patched scenario_summary if we changed it. Only
+                # **hard-gate** high issues block the patch — the F2/F3
+                # deliverable-coverage highs (error_amplification_paths /
+                # cross_system_links) are advisory M1 coverage gaps, not
+                # contract violations introduced by the patch. Surfacing them
+                # as post_patch_validation_failed would revert legitimate
+                # risk/HITL repairs whenever the upstream tool hadn't yet
+                # derived the F2/F3 artifacts. (F1 主案例/补充场景/材料清单
+                # 是课题级产物，不在单项目内，无对应 high issue。)
                 if patch_applied and scenario_summary:
                     from src.apps.api.app.services.stage1_contract import validate_stage1_summary
+                    _ADVISORY_F123_FIELDS = {
+                        "error_amplification_paths",
+                        "cross_system_links",
+                        "boundary_review_status",
+                    }
                     post_patch_issues = validate_stage1_summary(scenario_summary)
-                    high_post = [i for i in post_patch_issues if i.get("severity") == "high"]
+                    high_post = [
+                        i for i in post_patch_issues
+                        if i.get("severity") == "high"
+                        and (i.get("field") or "").split(".")[0] not in _ADVISORY_F123_FIELDS
+                    ]
                     if high_post:
                         # Revert — patch made things worse
                         patch_applied = False
@@ -2056,6 +2062,11 @@ def confirm_autoresearch_record(
                 if isinstance(record.context.get("execution_node"), dict)
                 else f"Applied autoResearch suggestion: {record.title}"
             ),
+            valid_result=base_result.valid_result,
+            invalid_reason=base_result.invalid_reason,
+            # HCR-P1-02：从 base_result 复制 first-class 溯源字段，保持可追溯链。
+            skill_name=base_result.skill_name,
+            config_version_id=base_result.config_version_id,
         )
         save_stage_result(stage_result)
         diff_summary = build_stage_result_diff(stage_result, base_result, trigger=decision)

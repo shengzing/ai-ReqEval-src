@@ -15,8 +15,16 @@ class SkillDefinition:
     output_schema: dict[str, str] = field(default_factory=dict)
     allowed_tools: list[str] = field(default_factory=list)
     allowed_subagents: list[str] = field(default_factory=list)
-    auto_run_condition: str = "manual_or_agent_selected"
+    auto_run_condition: str = "manual"  # 已固化为 manual：执行仅人工触发；AutoResearch 走独立 API
     visibility: str = "visible"
+    # HCR-P0-04: explicit per-Skill HITL checkpoint policy. "never" takes no
+    # durable checkpoint (stage-2/3/4 keep their existing non-paused flow);
+    # "risk_gated" takes a checkpoint before the decision node so the
+    # contract's L3/boundary gate can decide pause-vs-discard. This field
+    # controls checkpoint-taking *only* — the L3-mandatory human-review rule
+    # lives in ``stage1_contract.stage1_requires_human_review`` and fires
+    # regardless of this value.
+    hitl_policy: str = "never"
 
 
 SKILL_DEFINITIONS = [
@@ -28,6 +36,7 @@ SKILL_DEFINITIONS = [
         output_schema={"summary": "string", "stage_result_patch": "object", "stage1_validation": "object", "input_binding": "object"},
         allowed_tools=["document_parse", "vision_parse", "risk_identify"],
         allowed_subagents=["risk_review_subagent"],
+        hitl_policy="risk_gated",
     ),
     SkillDefinition(
         name="value_modeling_skill",

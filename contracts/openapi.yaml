@@ -120,6 +120,29 @@ paths:
                 $ref: "#/components/schemas/StageResultListResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/stages/{stage_id}/completion-snapshot:
+    get:
+      summary: Read the authoritative post-completion stage snapshot
+      description: Returns one read model for a completed Run. Waiting, failed, or invalid Runs are rejected and do not hydrate the latest-result view.
+      tags: [stages]
+      parameters:
+        - $ref: "#/components/parameters/StageId"
+        - name: run_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Completion snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StageCompletionSnapshotResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /api/v1/stages/{stage_id}/conversations:
     get:
       summary: List stage conversations
@@ -453,6 +476,31 @@ paths:
                 $ref: "#/components/schemas/FileArtifactResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/files/{file_id}/relevance-review:
+    post:
+      summary: Record a human file relevance decision
+      tags: [files]
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileRelevanceReviewRequest"
+      responses:
+        "200":
+          description: Reviewed file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileArtifactResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
   /api/v1/files/{file_id}/vision-parse:
     post:
       summary: Parse file with vision-capable LLM
@@ -884,6 +932,14 @@ components:
           type: object
           additionalProperties: true
         summary: { type: string }
+        skill_name:
+          type: string
+          nullable: true
+          description: HCR-P1-02 first-class provenance; legacy docs null.
+        config_version_id:
+          type: string
+          nullable: true
+          description: HCR-P1-02 first-class provenance; legacy docs null.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         locked_at:
@@ -949,10 +1005,20 @@ components:
           type: string
         passed:
           type: boolean
+        machine_code:
+          type: string
+          description: Stable machine error code for CI/frontend switching (SCREAMING_SNAKE).
+        hint:
+          type: string
+          description: User-facing fix hint shown when this check fails.
+        object_id:
+          type: string
+          nullable: true
+          description: Most specific traceable object id for this check (stage_result id, autoresearch record id, or stage id as fallback).
         advisory:
           type: boolean
           description: If true, this check informs but does not block the ready determination.
-      required: [key, label, passed]
+      required: [key, label, passed, machine_code, hint]
     CreateConversationRequest:
       type: object
       properties:
@@ -1056,6 +1122,30 @@ components:
           type: string
           nullable: true
         size_bytes: { type: integer }
+        relevance_status: { type: string, enum: [pending_parse, related, needs_review, unrelated, rejected] }
+        relevance_score: { type: number, format: float }
+        relevance_reasons:
+          type: array
+          items: { type: string }
+        relevance_rule_version: { type: string }
+        relevance_input_hash: { type: string }
+        relevance_source: { type: string, enum: [machine, human] }
+        relevance_review_reason:
+          type: string
+          nullable: true
+        relevance_reviewed_by:
+          type: string
+          nullable: true
+        relevance_reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
+        relevance_previous_status:
+          type: string
+          enum: [pending_parse, related, needs_review, unrelated, rejected]
+          nullable: true
+          description: HCR-P1-03 relevance status before the most recent human review (legacy docs: null).
+        security_rejected: { type: boolean }
         created_at: { type: string, format: date-time }
       required: [id, project_id, filename, content_type, status, size_bytes, created_at]
     FileArtifactListResponse:
@@ -1066,6 +1156,22 @@ components:
           items:
             $ref: "#/components/schemas/FileArtifactResponse"
       required: [items]
+    FileRelevanceReviewRequest:
+      type: object
+      properties:
+        decision:
+          type: string
+          enum: [related, unrelated, rejected]
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        reviewer:
+          type: string
+          minLength: 1
+          maxLength: 100
+          default: workspace_user
+      required: [decision, reason]
     VisionParseRequest:
       type: object
       properties:
@@ -1155,6 +1261,29 @@ components:
         review_note:
           type: string
           nullable: true
+        relevance_status: { type: string, enum: [pending_parse, related, needs_review, unrelated, rejected] }
+        relevance_score: { type: number, format: float }
+        relevance_reasons:
+          type: array
+          items: { type: string }
+        relevance_rule_version: { type: string }
+        relevance_input_hash: { type: string }
+        relevance_source: { type: string, enum: [machine, human] }
+        relevance_review_reason:
+          type: string
+          nullable: true
+        relevance_reviewed_by:
+          type: string
+          nullable: true
+        relevance_reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
+        relevance_previous_status:
+          type: string
+          enum: [pending_parse, related, needs_review, unrelated, rejected]
+          nullable: true
+          description: HCR-P1-03 relevance status before the most recent human review (legacy docs: null).
         updated_at: { type: string, format: date-time }
       required: [id, project_id, name, source_type, created_at, status, updated_at]
     EvidenceListResponse:
@@ -1201,8 +1330,72 @@ components:
         config_version_id:
           type: string
           nullable: true
+        skill_name:
+          type: string
+          nullable: true
+        primary_skill:
+          type: string
+          nullable: true
+          description: HCR-P1-02 primary skill resolved from frozen snapshot.
+        enabled_skills:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: HCR-P1-02 enabled skills from frozen snapshot.
+        requested_skill_name:
+          type: string
+          nullable: true
+          description: HCR-P1-02 caller-requested skill.
+        routing_source:
+          type: string
+          nullable: true
+          description: HCR-P1-02 "snapshot" | "static_fallback".
         created_at: { type: string, format: date-time }
       required: [id, project_id, goal, status, failure_context, created_at]
+    StageCompletionSnapshotResponse:
+      type: object
+      description: Single read model used by the web client after a valid completed Run.
+      properties:
+        run:
+          $ref: "#/components/schemas/RunResponse"
+        stage:
+          $ref: "#/components/schemas/StageResponse"
+        latest_result:
+          allOf:
+            - $ref: "#/components/schemas/StageResultResponse"
+          nullable: true
+        lock_check:
+          $ref: "#/components/schemas/StageLockCheckResponse"
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileArtifactResponse"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceItemResponse"
+        suggestions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        conversation:
+          allOf:
+            - $ref: "#/components/schemas/ConversationResponse"
+          nullable: true
+        workspace:
+          $ref: "#/components/schemas/WorkspaceTreeResponse"
+        version_log:
+          allOf:
+            - $ref: "#/components/schemas/VersionLogResponse"
+          nullable: true
+          description: HCR-P1-05 latest version log for the stage (additive, may be absent on legacy snapshots).
+        vision_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/VisionResultSummaryResponse"
+          description: HCR-P1-05 saved vision parse summaries for the project (additive).
+      required: [run, stage, lock_check, files, evidence, suggestions, workspace]
     SkillResponse:
       type: object
       properties:

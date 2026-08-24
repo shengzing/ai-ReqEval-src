@@ -11,8 +11,10 @@ import { ApiError } from '@/lib/api-error'
 import { encodeProjectFile } from '@/lib/file-encoding'
 import { cn } from '@/lib/utils'
 import { loadFilePreview } from '@/lib/api-client'
-import type { Conversation, EvidenceItem, FilePreview, Project, RunStatus, Stage, StageSkill, SuggestionCard, SuggestionConfirmationResult, ToolCall } from '@/lib/types'
+import { createFileParseCoordinator, type FileParseStateMap } from '@/lib/file-parse-lifecycle'
+import type { Conversation, EvidenceItem, ExecutionTraceNode, FilePreview, Project, RunStatus, Stage, StageSkill, SuggestionCard, SuggestionConfirmationResult, ToolCall } from '@/lib/types'
 import { buildEnrichedStage, resolveActiveConversation } from '@/lib/workspace-state'
+import type { RunEvidenceFilter } from '@/hooks/use-codex-data'
 
 interface WorkspaceContentProps {
   loading: boolean
@@ -27,11 +29,16 @@ interface WorkspaceContentProps {
   currentConversationError?: string | null
   currentConversationLoading?: boolean
   toolCalls: ToolCall[]
+  executionTrace: ExecutionTraceNode[]
   suggestions: SuggestionCard[]
   skills: StageSkill[]
   evidenceItems: EvidenceItem[]
   currentRunStatus?: RunStatus
+  currentRunCheckpointStatus?: string
+  runEvidenceFilter?: RunEvidenceFilter
   stageResultPayload?: Record<string, unknown>
+  stageVersionLog?: Stage['versionLog']
+  stageLockCheck?: Stage['lockCheck']
   rightSidebarOpen: boolean
   highlightEvidenceName?: string
   onSetActiveProject: (projectId: string) => void
@@ -66,6 +73,13 @@ interface WorkspaceContentProps {
     context?: Record<string, unknown>
   }) => Promise<SuggestionCard>
   onParseEvidenceFile: (input: { fileId: string; projectId: string; stageId: string }) => Promise<void>
+  onReviewEvidenceFileRelevance: (input: {
+    fileId: string
+    projectId: string
+    stageId: string
+    decision: 'related' | 'unrelated' | 'rejected'
+    reason: string
+  }) => Promise<void>
   onVisionParseEvidenceFile: (input: { fileId: string; projectId: string; stageId: string; stageName?: string }) => Promise<void>
   onGenerateReport: (input: { projectId: string; stageId: string; title: string }) => Promise<NonNullable<Stage['reportInfo']>>
   onLoadReportContent: (reportId: string) => Promise<{ id: string; title: string; status: string; content: string }>
@@ -106,11 +120,16 @@ export function WorkspaceContent({
   currentConversationError,
   currentConversationLoading,
   toolCalls,
+  executionTrace,
   suggestions,
   skills,
   evidenceItems,
   currentRunStatus,
+  currentRunCheckpointStatus,
+  runEvidenceFilter,
   stageResultPayload,
+  stageVersionLog,
+  stageLockCheck,
   rightSidebarOpen,
   highlightEvidenceName,
   onSetActiveProject,
@@ -123,6 +142,7 @@ export function WorkspaceContent({
   onUploadEvidenceFiles,
   onCreateEvidenceSuggestion,
   onParseEvidenceFile,
+  onReviewEvidenceFileRelevance,
   onVisionParseEvidenceFile,
   onGenerateReport,
   onLoadReportContent,
@@ -144,7 +164,11 @@ export function WorkspaceContent({
   const [previewContent, setPreviewContent] = useState<FilePreview | undefined>()
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [fileParseStates, setFileParseStates] = useState<FileParseStateMap>({})
   const previewRequestIdRef = useRef(0)
+  const fileParseCoordinatorRef = useRef(createFileParseCoordinator())
+  const activeProjectRef = useRef(activeProject)
+  activeProjectRef.current = activeProject
 
   // Reset cached report info when the user navigates to a different project or
   // stage. Without this, buildEnrichedStage (below) keeps leaking the previous
@@ -155,7 +179,37 @@ export function WorkspaceContent({
     setPreviewContent(undefined)
     setPreviewError(null)
     setPreviewLoading(false)
+    setFileParseStates({})
   }, [activeProject, activeStage])
+
+  const handleParseEvidenceFile = async (fileId: string) => {
+    if (!activeProject || !activeStage) return
+    const parseProjectId = activeProject
+    await fileParseCoordinatorRef.current.run(
+      fileId,
+      () => onParseEvidenceFile({
+        fileId,
+        projectId: activeProject,
+        stageId: activeStage,
+      }),
+      (state) => {
+        if (activeProjectRef.current !== parseProjectId) return
+        setFileParseStates((previous) => ({ ...previous, [fileId]: state }))
+        // 成功提示自动消失：避免"重新解析完成…"长期残留盖住行内容。
+        // error 不自动清，保留供用户点"重新解析"重试，直到下次解析或切阶段 reset。
+        if (state.status === 'success') {
+          window.setTimeout(() => {
+            if (activeProjectRef.current !== parseProjectId) return
+            setFileParseStates((previous) => {
+              const next = { ...previous }
+              delete next[fileId]
+              return next
+            })
+          }, 4000)
+        }
+      },
+    )
+  }
 
   const resolvedConversation = resolveActiveConversation({
     currentConversation,
@@ -167,11 +221,13 @@ export function WorkspaceContent({
       currentStage,
       resultPayload: stageResultPayload,
       reportInfo: latestReportInfo,
+      versionLog: stageVersionLog,
+      lockCheck: stageLockCheck,
       skills,
       suggestions,
       currentRunStatus,
     })
-  }, [currentStage, stageResultPayload, latestReportInfo, skills, suggestions, currentRunStatus])
+  }, [currentStage, stageResultPayload, latestReportInfo, stageVersionLog, stageLockCheck, skills, suggestions, currentRunStatus])
 
   const handlePreviewResource = async (item: EvidenceItem) => {
     const fileId = item.sourceFileId ?? item.id
@@ -205,7 +261,7 @@ export function WorkspaceContent({
     if (activeStage && enrichedStage) {
       return (
         <StageWorkspace
-          projectId={activeProject}
+          project={currentProject}
           stage={enrichedStage}
           conversation={resolvedConversation}
           activeConversationId={activeConversation}
@@ -213,9 +269,11 @@ export function WorkspaceContent({
           conversationLoading={currentConversationLoading}
           conversationLoadError={currentConversationError}
           toolCalls={toolCalls}
+          executionTrace={executionTrace}
           suggestionCards={suggestions}
           evidenceItems={evidenceItems}
           runStatus={currentRunStatus}
+          runEvidenceFilter={runEvidenceFilter}
           stageCommandHint={
             activeConversation
               ? '当前会话内继续输入，将沿用这个会话。'
@@ -230,9 +288,11 @@ export function WorkspaceContent({
           onOpenRightSidebar={() => onSetRightSidebarOpen(true)}
           onStartRun={async (goal) => {
             if (!activeConversation) {
+              // 按钮触发的阶段执行：新建会话但不产生用户气泡，goal 由执行
+              // 时间线与完成时的智能体消息承载。后端以 [RUN] 前缀跳过 user 消息。
               const selection = await onCreateConversation(activeStage!, {
                 title: goal.slice(0, 24),
-                initialMessage: goal,
+                initialMessage: `[RUN] ${goal}`,
               })
               if (selection.projectId) onSetActiveProject(selection.projectId)
               onSelectConversation(selection.conversationId, selection.stageId)
@@ -265,6 +325,24 @@ export function WorkspaceContent({
                     files: encodedFiles,
                   })
                   onSetRightSidebarOpen(true)
+                }
+              : undefined
+          }
+          onParseFile={
+            activeProject && activeStage
+              ? handleParseEvidenceFile
+              : undefined
+          }
+          fileParseStates={fileParseStates}
+          onVisionParseFile={
+            activeProject && activeStage
+              ? async (fileId) => {
+                  await onVisionParseEvidenceFile({
+                    fileId,
+                    projectId: activeProject,
+                    stageId: activeStage,
+                    stageName: enrichedStage?.name,
+                  })
                 }
               : undefined
           }
@@ -325,7 +403,7 @@ export function WorkspaceContent({
               : undefined
           }
           onResumeRun={
-            currentRunId && activeProject && activeStage && activeConversation && onResumePausedRun
+            currentRunCheckpointStatus === 'paused' && currentRunId && activeProject && activeStage && activeConversation && onResumePausedRun
               ? (runId, humanInput) => onResumePausedRun(runId, humanInput)
               : undefined
           }
@@ -411,15 +489,10 @@ export function WorkspaceContent({
         highlightedEvidenceName={highlightEvidenceName}
         onParseFile={
           activeProject && activeStage
-            ? async (fileId) => {
-                await onParseEvidenceFile({
-                  fileId,
-                  projectId: activeProject,
-                  stageId: activeStage,
-                })
-              }
+            ? handleParseEvidenceFile
             : undefined
         }
+        fileParseStates={fileParseStates}
         onVisionParseFile={
           activeProject && activeStage
             ? async (fileId) => {
@@ -428,6 +501,19 @@ export function WorkspaceContent({
                   projectId: activeProject,
                   stageId: activeStage,
                   stageName: enrichedStage?.name,
+                })
+              }
+            : undefined
+        }
+        onReviewRelevance={
+          activeProject && activeStage
+            ? async (fileId, decision, reason) => {
+                await onReviewEvidenceFileRelevance({
+                  fileId,
+                  projectId: activeProject,
+                  stageId: activeStage,
+                  decision,
+                  reason,
                 })
               }
             : undefined

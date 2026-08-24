@@ -27,6 +27,7 @@ export interface StageSkillProfileLike {
   primary_skill: string
   enabled_tools: string[]
   enabled_subagents: string[]
+  enabled_skills: string[]
   auto_run_condition: string
   skill_versions: Record<string, string>
 }
@@ -98,10 +99,11 @@ export function collectStageImpact(base: SettingsLike, draft: SettingsLike): Sta
     if (!baseProfile || !draftProfile) continue
     const toolChanged = !arrayEqual(baseProfile.enabled_tools, draftProfile.enabled_tools)
     const subagentChanged = !arrayEqual(baseProfile.enabled_subagents, draftProfile.enabled_subagents)
+    const enabledSkillsChanged = !arrayEqual(baseProfile.enabled_skills, draftProfile.enabled_skills)
     const primarySkillChanged = baseProfile.primary_skill !== draftProfile.primary_skill
     const autoRunChanged = baseProfile.auto_run_condition !== draftProfile.auto_run_condition
     const skillVersionsChanged = !recordEqual(baseProfile.skill_versions, draftProfile.skill_versions)
-    if (toolChanged || subagentChanged || primarySkillChanged || autoRunChanged || skillVersionsChanged) {
+    if (toolChanged || subagentChanged || enabledSkillsChanged || primarySkillChanged || autoRunChanged || skillVersionsChanged) {
       impacts.push({ stage_id: stageId, change_type: 'modified' })
     }
   }

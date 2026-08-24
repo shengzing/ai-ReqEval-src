@@ -19,9 +19,17 @@ class HarnessState(TypedDict, total=False):
     config_version_id: str
     skill_name: str
     skill_version: str
+    # HCR-P1-02 配置溯源：与 HarnessRequest 同名字段，tool_nodes.py 重建
+    # per-tool HarnessRequest 时透传。仅审计用。
+    primary_skill: str
+    enabled_skills: list[str]
     allowed_tools: list[str]
     enabled_tools: list[str]
     enabled_subagents: list[str]
+    # Request-scoped execution controls. These are process-local objects used
+    # by the graph's tool node; they are not included in result contracts.
+    permission_adapter: Any
+    tool_adapter: Any
     evidence_items: list[dict[str, Any]]
     vision_results: list[dict[str, Any]]
     previous_stage_result: dict[str, Any] | None
@@ -30,6 +38,7 @@ class HarnessState(TypedDict, total=False):
     tool_results: dict[str, dict[str, Any]]
     tool_result_items: list[dict[str, Any]]
     tool_failures: list[dict[str, Any]]
+    tool_skips: list[dict[str, Any]]
     synthesized_payload: dict[str, Any]
     validation_issues: list[dict[str, Any]]
     quality_scores: dict[str, Any]
@@ -40,8 +49,10 @@ class HarnessState(TypedDict, total=False):
     # HITL resume fields
     thread_id: str
     human_input: dict[str, Any]
+    checkpoint: dict[str, Any]
     # Subagent results
     subagent_results: list[dict[str, Any]]
+    subagent_audits: list[dict[str, Any]]
     # AutoResearch fields
     auto_run_condition: str
     autoresearch_record_ids: list[str]
@@ -59,4 +70,3 @@ class HarnessState(TypedDict, total=False):
     prompt_hashes: dict[str, str]     # {prompt_id: sha256_hex}
     # L3: RuleProposal ids emitted during refinement
     rule_proposal_ids: list[str]
-

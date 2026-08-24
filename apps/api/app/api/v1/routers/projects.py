@@ -24,6 +24,7 @@ from src.apps.api.app.api.v1.schemas.projects import (
     ExecutionLogListResponse,
     ExecutionLogResponse,
     FileArtifactListResponse,
+    FileRelevanceReviewRequest,
     FileArtifactResponse,
     FilePreviewResponse,
     FileUploadRequest,
@@ -77,6 +78,7 @@ from src.apps.api.app.services.project_service import (
     list_stage_results,
     list_stages,
     parse_file,
+    review_file_relevance,
 )
 from src.apps.api.app.services.vision_service import load_project_vision_results, parse_file_with_vision
 
@@ -260,6 +262,7 @@ def post_conversation_message(conversation_id: str, request: AppendMessageReques
                 content=invocation.assistant_message.content,
                 created_at=invocation.assistant_message.created_at,
                 tool_calls=list(invocation.assistant_message.tool_calls),
+                citations=list(invocation.assistant_message.citations),
             ),
             harness=HarnessSummary(
                 conversation_harness_version=invocation.result.conversation_harness_version,
@@ -273,6 +276,7 @@ def post_conversation_message(conversation_id: str, request: AppendMessageReques
                         title=p.get("title", ""),
                         requires_confirmation=p.get("requires_confirmation", True),
                         status="pending",
+                        confirmation_id=None,
                     )
                     for pid, p in zip(invocation.action_proposal_ids, invocation.result.action_proposals)
                 ],
@@ -313,14 +317,16 @@ def _append_harness_failure_assistant_message(conversation_id: str, exc: Excepti
 async def post_conversation_action_proposal_confirm(
     conversation_id: str, proposal_id: str
 ) -> ConfirmActionProposalResponse:
-    """Confirm a conversation action proposal, creating the backing Run."""
+    """Confirm a controlled proposal, creating a Run only when required."""
     proposal, run = conversation_action_service.confirm_action_proposal(
         proposal_id, conversation_id=conversation_id
     )
-    run_service.start_run_background(run)
+    if run is not None:
+        run_service.start_run_background(run)
     return ConfirmActionProposalResponse(
         proposal=ActionProposalResponse.model_validate(proposal, from_attributes=True),
-        run_id=run.id,
+        run_id=run.id if run else None,
+        confirmation_id=proposal.confirmation_id,
     )
 
 
@@ -365,6 +371,17 @@ def get_file_preview_route(file_id: str) -> FilePreviewResponse:
 @router.post("/files/{file_id}/parse", response_model=FileArtifactResponse)
 def post_file_parse(file_id: str) -> FileArtifactResponse:
     artifact = parse_file(file_id)
+    return FileArtifactResponse.model_validate(artifact, from_attributes=True)
+
+
+@router.post("/files/{file_id}/relevance-review", response_model=FileArtifactResponse)
+def post_file_relevance_review(file_id: str, request: FileRelevanceReviewRequest) -> FileArtifactResponse:
+    artifact = review_file_relevance(
+        file_id,
+        decision=request.decision,
+        reason=request.reason,
+        reviewer=request.reviewer,
+    )
     return FileArtifactResponse.model_validate(artifact, from_attributes=True)
 
 
