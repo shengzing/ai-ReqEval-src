@@ -180,15 +180,16 @@ def validate_stage3_summary(summary: dict, *, previous_stage_result: dict | None
                 "suggested_action": "Recompute actual SLA from sample scores",
             })
 
-    # 5. Large gap for L3 scenarios requires attention
+    # 5. Negative gap beyond 5pp for L3 scenarios requires attention.
+    # gap_to_target_pct = Actual SLA - Target SLA; negative means under target.
     risk_level = summary.get("risk_level")
-    if risk_level == "L3" and isinstance(gap, (int, float)) and gap > 5:
+    if risk_level == "L3" and isinstance(gap, (int, float)) and gap < -5:
         issues.append({
             "issue_type": "sla_gap_l3",
             "field": "gap_to_target_pct",
             "severity": "high",
-            "message": f"L3 scenario has SLA gap of {gap}%, exceeding 5% threshold; requires HITL review",
-            "suggested_action": "Escalate for HITL review — L3 scenarios with SLA gaps need domain expert sign-off",
+            "message": f"L3 scenario has an under-target SLA gap of {abs(gap):.1f}pp, exceeding 5pp; requires HITL review",
+            "suggested_action": "Escalate for HITL review — L3 scenarios with under-target SLA gaps need domain expert sign-off",
         })
 
     # 6. Probe consistency: low_score_samples ratio should not be extreme
@@ -304,16 +305,17 @@ def compute_stage3_quality(summary: dict) -> dict:
     risk_consistency = 1.0 if risk_level in {"L1", "L2", "L3"} else 0.0
 
     # SLA alignment: gap within acceptable range
+    # gap = Actual SLA - Target SLA (pp): >=0 meets target, <0 under target.
     gap = summary.get("gap_to_target_pct")
     sla_alignment = 0.5  # Default
     if isinstance(gap, (int, float)):
-        if gap <= 0:
+        if gap >= 0:
             sla_alignment = 1.0  # Meeting or exceeding target
-        elif gap <= 5:
+        elif gap >= -5:
             sla_alignment = 0.9
-        elif gap <= 10:
+        elif gap >= -10:
             sla_alignment = 0.7
-        elif gap <= 20:
+        elif gap >= -20:
             sla_alignment = 0.4
         else:
             sla_alignment = 0.2

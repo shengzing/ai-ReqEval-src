@@ -1294,7 +1294,8 @@ def actual_sla_summary_tool(
 ) -> ToolResult:
     """Stage 3 tool: compute actual SLA from sample scores.
 
-    Reads target_sla from Stage 2 result. Computes gap_to_target_pct as int.
+    Reads target_sla from Stage 2 result. Computes gap_to_target_pct as int,
+    using gap = Actual SLA − Target SLA (negative = under target).
     """
     # Get Stage 1 risk for SLA baseline
     stage1_summary = (previous_stage_result or {}).get("scenario_summary", {})
@@ -1311,16 +1312,16 @@ def actual_sla_summary_tool(
         actual_sla = 90.0
         target_sla_pct = 95.0
 
-    gap_to_target_pct = int(target_sla_pct - actual_sla)
+    gap_to_target_pct = int(actual_sla - target_sla_pct)
 
     stability = "confirmed"
     warnings = []
     if not previous_stage_result:
         stability = "needs_confirmation"
         warnings.append("No Stage 1 result found; using default SLA summary.")
-    if gap_to_target_pct > 5:
+    if gap_to_target_pct < -5:
         stability = "unstable"
-        warnings.append(f"SLA gap of {gap_to_target_pct}% exceeds 5% threshold.")
+        warnings.append(f"SLA is {abs(gap_to_target_pct)}pp under target, exceeding 5pp threshold.")
 
     evidence_refs = []
     if evidence_items:

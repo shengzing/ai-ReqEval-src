@@ -824,7 +824,7 @@ def _build_stage_specific_recommendation(stage_name: str, stage_id: str, stage_r
         high_issues = [i for i in structured_issues if i["severity"] == "high"]
         low_score_samples = stage3_summary.get("low_score_samples", 0) if isinstance(stage3_summary, dict) else 0
         gap_pct = stage3_summary.get("gap_to_target_pct", 0) if isinstance(stage3_summary, dict) else 0
-        high_gap = isinstance(gap_pct, (int, float)) and gap_pct > 10
+        high_gap = isinstance(gap_pct, (int, float)) and gap_pct < -10
 
         if high_issues:
             affected = ", ".join(i["affected_field"] for i in high_issues[:3])
@@ -833,7 +833,7 @@ def _build_stage_specific_recommendation(stage_name: str, stage_id: str, stage_r
                 "建议逐一处理后再推进锁定。"
             ).format(len(high_issues), affected)
         elif high_gap:
-            description = "SLA 缺口过大（{0}%），需评估改进方案并补充失败模式分析。".format(gap_pct)
+            description = "SLA 低于目标过多（{0}个百分点），需评估改进方案并补充失败模式分析。".format(abs(gap_pct))
         elif low_score_samples > 3:
             description = "低分样本过多（{0}个），建议深入分析失败原因，考虑调整任务或模型。".format(low_score_samples)
         elif validation_issues:

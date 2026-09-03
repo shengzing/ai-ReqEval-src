@@ -299,12 +299,12 @@ def _review_probe(
         suggestions.append("分析低分样本原因，考虑调整任务或模型")
 
     gap = sla_output.get("gap_to_target_pct", 0)
-    if isinstance(gap, (int, float)) and gap > 10:
+    if isinstance(gap, (int, float)) and gap < -10:
         issues.append({
             "issue_type": "sla_gap_large",
             "field": "gap_to_target_pct",
             "severity": "medium",
-            "message": f"SLA 缺口过大 ({gap}%)，需评估改进方案",
+            "message": f"SLA 低于目标过多 ({abs(gap)}pp)，需评估改进方案",
         })
         suggestions.append("评估是否需要调整 SLA 目标或改进模型")
 

@@ -5,7 +5,7 @@ given a scenario's risk grade (L1/L2/L3 from Stage 1), the target SLA
 (e3-value back-deduction from Stage 2), and the actual SLA (TTF probe
 results from Stage 3), it outputs one of three project-level decisions:
 
-* ``approve``        — risk is acceptable, target is met by actual → 立项
+* ``approve``        — risk is acceptable, actual meets target → 立项
 * ``defer``          — risk is acceptable but actual is below target   → 暂缓立项
 * ``reject``         — risk is too high, or actual is far below target → 不予立项
 
@@ -40,6 +40,11 @@ ALIGNMENT_DECISIONS = frozenset({
 
 
 # ── Decision thresholds (single source of truth) ─────────────────────
+#
+# Sign convention (matches the thesis Δ_sla and stage3_contract's
+# gap_to_target_pct): gap = Actual SLA − Target SLA, in percentage
+# points.  Positive = actual meets/exceeds target; negative = actual
+# falls short of target.
 
 # target_sla minimum by risk level — e3-value back-deduction policy.
 # L3 (regulatory/safety critical) needs ≥95% target; L1 ≥85%; L2 in between.
@@ -49,13 +54,13 @@ TARGET_SLA_FLOOR_BY_RISK: dict[str, float] = {
     "L3": 95.0,
 }
 
-# gap_to_target_pct below which Actual SLA is considered "meeting target".
-# 5 percentage points tolerance: a small probe jitter is acceptable.
+# gap_to_target_pct = Actual SLA − Target SLA, in percentage points.
+# Non-negative values mean the actual result meets or exceeds target.
 ACCEPTABLE_GAP_PCT = 5.0
 
-# gap_to_target_pct above which we recommend reject even for L1.
-# A 20-point gap is a fundamental mismatch that warrants walking away.
-REJECTION_GAP_PCT = 20.0
+# A negative gap beyond 20 percentage points is a fundamental mismatch
+# that warrants walking away.
+REJECTION_GAP_PCT = -20.0
 
 
 # ── Core decision function ───────────────────────────────────────────
@@ -104,9 +109,9 @@ def compute_3d_alignment(
     target_sla_f = float(target_sla)
     actual_sla_f = float(actual_sla)
 
-    # Compute gap if not provided.
+    # Compute gap if not provided: gap = Actual − Target (pp).
     if gap_to_target_pct is None:
-        gap_to_target_pct = round(target_sla_f - actual_sla_f, 2)
+        gap_to_target_pct = round(actual_sla_f - target_sla_f, 2)
 
     inputs = {
         "risk_level": risk_level,
@@ -139,8 +144,8 @@ def compute_3d_alignment(
             "missing_dimensions": [],
         }
 
-    # Rule 3: large gap → reject.
-    if gap_to_target_pct > REJECTION_GAP_PCT:
+    # Rule 3: a large negative gap → reject.
+    if gap_to_target_pct < REJECTION_GAP_PCT:
         return {
             "decision": DECISION_REJECT,
             "rationale": (
@@ -151,8 +156,8 @@ def compute_3d_alignment(
             "missing_dimensions": [],
         }
 
-    # Rule 4: small gap → defer (需要优化后再立项).
-    if gap_to_target_pct > ACCEPTABLE_GAP_PCT:
+    # Rule 4: a moderate negative gap → defer (需要优化后再立项).
+    if gap_to_target_pct < -ACCEPTABLE_GAP_PCT:
         return {
             "decision": DECISION_DEFER,
             "rationale": (
@@ -163,7 +168,7 @@ def compute_3d_alignment(
             "missing_dimensions": [],
         }
 
-    # Rule 5: gap within tolerance → approve.
+    # Rule 5: gap within tolerance, or actual exceeds target → approve.
     return {
         "decision": DECISION_APPROVE,
         "rationale": (
@@ -184,8 +189,8 @@ def should_interrupt_for_human(alignment: dict[str, Any]) -> bool:
     Used by ``maybe_interrupt`` in graph.py to decide whether to
     request a HITL review.  Defer and Reject always require human
     judgment (they are blocking); Approve with a tight margin
-    (<2pp) is advisory; Insufficient dimensions are blocking because
-    the next stage cannot proceed without a decision.
+    (within 2pp of target) is advisory; Insufficient dimensions are
+    blocking because the next stage cannot proceed without a decision.
     """
     decision = alignment.get("decision")
     if decision in {DECISION_DEFER, DECISION_REJECT, DECISION_INSUFFICIENT}:
