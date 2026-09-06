@@ -23,6 +23,21 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from .formulas.hard_constraint import (
+    HardConstraintInput,
+    compute_g_hard,
+)
+from .formulas.decision import (
+    VERDICT_GO,
+    VERDICT_HOLD,
+    VERDICT_NOGO,
+    build_remediation_items,
+    compute_decision,
+    grade_gap,
+    validate_exit_alternative,
+)
+from .formulas.net_value import compute_actor_net_value
+
 
 # ── Decision enum values ──────────────────────────────────────────────
 
@@ -37,6 +52,27 @@ ALIGNMENT_DECISIONS = frozenset({
     DECISION_REJECT,
     DECISION_INSUFFICIENT,
 })
+
+
+# ── Thesis verdict mapping (go/hold/nogo ↔ approve/defer/reject) ──────
+#
+# The thesis (§3.5.2 式(6)) uses go/hold/nogo as the decision vocabulary.
+# The codebase historically used approve/defer/reject/insufficient.  We
+# keep the legacy enum for backward compatibility with existing callers
+# (graph.py maybe_interrupt, autoresearch_service.py) and add a mapping
+# layer so new code can use the thesis vocabulary.
+
+THESIS_VERDICT_MAP: dict[str, str] = {
+    DECISION_APPROVE: "go",
+    DECISION_DEFER: "hold",
+    DECISION_REJECT: "nogo",
+    DECISION_INSUFFICIENT: "nogo",
+}
+
+
+def decision_to_thesis_verdict(decision: str) -> str:
+    """Map a legacy decision enum to the thesis go/hold/nogo vocabulary."""
+    return THESIS_VERDICT_MAP.get(decision, "nogo")
 
 
 # ── Decision thresholds (single source of truth) ─────────────────────
@@ -72,17 +108,43 @@ def compute_3d_alignment(
     target_sla: Optional[float],
     actual_sla: Optional[float],
     gap_to_target_pct: Optional[float] = None,
+    # ── 式(5)/(6) extended inputs (optional, default to legacy single-dim path) ──
+    prohibited_hit: Optional[bool] = None,
+    fatal_error_rate: Optional[float] = None,
+    general_error_rate: Optional[float] = None,
+    audit_completeness: Optional[float] = None,
+    hitl_triggered: Optional[bool] = None,
+    sample_compliant: Optional[bool] = None,
+    net_value: Optional[float] = None,
+    actor_benefits: Optional[dict[str, float]] = None,
+    actor_costs: Optional[dict[str, float]] = None,
+    sensitivity_confirmed_negative: bool = False,
+    alternative_flow_configured: bool = False,
 ) -> dict[str, Any]:
     """Decide project status from the three evaluation dimensions.
 
+    **Two-mode operation:**
+
+    * **Legacy single-dim mode** (default): only ``risk_level``,
+      ``target_sla``, ``actual_sla`` are provided.  Uses the original
+      gap-based rules (floor check → reject, gap<−20 → reject,
+      gap<−5 → defer, else → approve).  Preserved for backward
+      compatibility with existing callers that have not yet been
+      migrated to the full 式(5)/(6) pipeline.
+
+    * **Full 式(5)/(6) mode** (when any extended input is non-None):
+      Computes ``G_hard`` via 式(5), then ``verdict`` via 式(6), then
+      maps to the legacy enum.  Per-actor net value and reciprocity
+      checks run when actor_benefits/costs are provided.
+
     Returns a dict with:
-      * ``decision`` — one of ``approve``/``defer``/``reject``/``insufficient``
+      * ``decision`` — approve|defer|reject|insufficient (legacy enum)
+      * ``verdict`` — go|hold|nogo (thesis enum, added in full mode)
       * ``rationale`` — Chinese-language one-liner explaining the decision
-      * ``inputs`` — echo of the inputs (risk_level, target_sla,
-        actual_sla, gap_to_target_pct) for traceability
-      * ``missing_dimensions`` — which of the three dimensions are
-        not yet available (used by the caller to decide whether the
-        decision is binding)
+      * ``inputs`` — echo of the inputs for traceability
+      * ``missing_dimensions`` — which of the three dimensions are not yet available
+      * (full mode only) ``G_hard``, ``g_hard_components``, ``failed_terms``,
+        ``remediation_items``, ``actor_net_value``, ``exit_alternative_required``
     """
     missing: list[str] = []
     if not risk_level:
@@ -95,6 +157,7 @@ def compute_3d_alignment(
     if missing:
         return {
             "decision": DECISION_INSUFFICIENT,
+            "verdict": "nogo",
             "rationale": "三维对齐决策所需维度不足：{0}".format("、".join(missing)),
             "inputs": {
                 "risk_level": risk_level,
@@ -120,12 +183,38 @@ def compute_3d_alignment(
         "gap_to_target_pct": gap_to_target_pct,
     }
 
-    # ── Decision rules ───────────────────────────────────────────
+    # ── Check if full 式(5)/(6) mode is requested ───────────────
+    extended_provided = any(v is not None for v in (
+        prohibited_hit, fatal_error_rate, general_error_rate,
+        audit_completeness, hitl_triggered, sample_compliant, net_value,
+    ))
+
+    if extended_provided:
+        return _compute_full_mode(
+            risk_level=risk_level,
+            target_sla_f=target_sla_f,
+            gap_to_target_pct=gap_to_target_pct,
+            inputs=inputs,
+            prohibited_hit=prohibited_hit,
+            fatal_error_rate=fatal_error_rate,
+            general_error_rate=general_error_rate,
+            audit_completeness=audit_completeness,
+            hitl_triggered=hitl_triggered,
+            sample_compliant=sample_compliant,
+            net_value=net_value,
+            actor_benefits=actor_benefits,
+            actor_costs=actor_costs,
+            sensitivity_confirmed_negative=sensitivity_confirmed_negative,
+            alternative_flow_configured=alternative_flow_configured,
+        )
+
+    # ── Legacy single-dim decision rules (backward-compatible) ──
     # Rule 1: risk_level must be one of the contract values.
     floor = TARGET_SLA_FLOOR_BY_RISK.get(risk_level)
     if floor is None:
         return {
             "decision": DECISION_INSUFFICIENT,
+            "verdict": "nogo",
             "rationale": "risk_level {0!r} 不在合同枚举中（L1/L2/L3），无法决策。".format(risk_level),
             "inputs": inputs,
             "missing_dimensions": ["risk_level"],
@@ -135,6 +224,7 @@ def compute_3d_alignment(
     if target_sla_f < floor:
         return {
             "decision": DECISION_REJECT,
+            "verdict": "nogo",
             "rationale": (
                 "目标 SLA（{0:.1f}）低于风险等级 {1} 的最低门槛（{2:.1f}），"
                 "且实际 SLA（{3:.1f}）与之差距 {4:.1f}pp，"
@@ -148,6 +238,7 @@ def compute_3d_alignment(
     if gap_to_target_pct < REJECTION_GAP_PCT:
         return {
             "decision": DECISION_REJECT,
+            "verdict": "nogo",
             "rationale": (
                 "实际 SLA（{0:.1f}）与目标 SLA（{1:.1f}）差距 {2:.1f}pp，"
                 "超过 {3:.1f}pp 红线，建议不予立项。"
@@ -160,6 +251,7 @@ def compute_3d_alignment(
     if gap_to_target_pct < -ACCEPTABLE_GAP_PCT:
         return {
             "decision": DECISION_DEFER,
+            "verdict": "hold",
             "rationale": (
                 "实际 SLA（{0:.1f}）与目标 SLA（{1:.1f}）差距 {2:.1f}pp，"
                 "建议暂缓立项并补强探针。"
@@ -171,6 +263,7 @@ def compute_3d_alignment(
     # Rule 5: gap within tolerance, or actual exceeds target → approve.
     return {
         "decision": DECISION_APPROVE,
+        "verdict": "go",
         "rationale": (
             "风险等级 {0} 与目标/实际 SLA 对齐良好（差距 {1:.1f}pp），"
             "建议立项。"
@@ -178,6 +271,95 @@ def compute_3d_alignment(
         "inputs": inputs,
         "missing_dimensions": [],
     }
+
+
+def _compute_full_mode(
+    *,
+    risk_level: str,
+    target_sla_f: float,
+    gap_to_target_pct: float,
+    inputs: dict[str, Any],
+    prohibited_hit: Optional[bool],
+    fatal_error_rate: Optional[float],
+    general_error_rate: Optional[float],
+    audit_completeness: Optional[float],
+    hitl_triggered: Optional[bool],
+    sample_compliant: Optional[bool],
+    net_value: Optional[float],
+    actor_benefits: Optional[dict[str, float]],
+    actor_costs: Optional[dict[str, float]],
+    sensitivity_confirmed_negative: bool,
+    alternative_flow_configured: bool,
+) -> dict[str, Any]:
+    """Full 式(5)/(6) decision path — G_hard conjunction + three-state."""
+    # ── 式(5): G_hard ───────────────────────────────────────────
+    hc_input = HardConstraintInput(
+        risk_level=risk_level,
+        prohibited_hit=prohibited_hit,
+        fatal_error_rate=fatal_error_rate,
+        general_error_rate=general_error_rate,
+        audit_completeness=audit_completeness,
+        hitl_triggered=hitl_triggered,
+        sample_compliant=sample_compliant,
+        net_value=net_value,
+    )
+    g_hard_result = compute_g_hard(hc_input)
+    g_hard = g_hard_result["G_hard"]
+
+    # ── 式(6): verdict ──────────────────────────────────────────
+    dec_result = compute_decision(
+        g_hard=g_hard,
+        delta_sla=gap_to_target_pct,
+        net_value=net_value,
+        sensitivity_confirmed_negative=sensitivity_confirmed_negative,
+        risk_level=risk_level,
+        target_sla=target_sla_f,
+        failed_terms=g_hard_result["failed_terms"],
+    )
+    verdict = dec_result["verdict"]
+
+    # Map thesis verdict → legacy decision enum
+    verdict_to_decision = {
+        VERDICT_GO: DECISION_APPROVE,
+        VERDICT_HOLD: DECISION_DEFER,
+        VERDICT_NOGO: DECISION_REJECT,
+    }
+    decision = verdict_to_decision.get(verdict, DECISION_INSUFFICIENT)
+
+    # ── Exit-AI alternative validation (§3.5.3) ───────────────
+    exit_alt = validate_exit_alternative(verdict, alternative_flow_configured)
+
+    # ── Per-actor net value (if provided) ───────────────────────
+    actor_result = None
+    actor_masking_flag = False
+    if actor_benefits is not None and actor_costs is not None:
+        actor_result = compute_actor_net_value(actor_benefits, actor_costs)
+        actor_masking_flag = actor_result["aggregation_masking"]
+
+    result: dict[str, Any] = {
+        "decision": decision,
+        "verdict": verdict,
+        "rationale": dec_result["decision_rationale"],
+        "inputs": inputs,
+        "missing_dimensions": [],
+        # 式(5) artifacts
+        "G_hard": g_hard,
+        "g_hard_components": g_hard_result["g_hard_components"],
+        "failed_terms": g_hard_result["failed_terms"],
+        # 式(6) artifacts
+        "remediation_items": dec_result["remediation_items"],
+        "dec_path": dec_result["dec_path"],
+        "gap_grade": dec_result.get("gap_grade"),
+        # §3.5.3 exit alternative
+        "exit_alternative_required": exit_alt["exit_alternative_required"],
+        "exit_alternative_note": exit_alt["exit_alternative_note"],
+        # per-actor masking
+        "actor_masking_flag": actor_masking_flag,
+    }
+    if actor_result is not None:
+        result["actor_net_value"] = actor_result["actor_net_value"]
+        result["masking_actors"] = actor_result["masking_actors"]
+    return result
 
 
 # ── Convenience helpers ──────────────────────────────────────────────

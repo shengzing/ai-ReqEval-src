@@ -8,8 +8,13 @@ Stage 4 (Post-Implementation / Report & Export) validates:
 - export_ready boolean consistency
 - evidence_refs presence
 - risk_level propagation from Stage 1
+- 式(5)-(7) decision artifacts: G_hard/verdict/remediation_items/
+  actor_net_value masking/exit_alternative/retro_gap (P4 validators)
 
 Pure module — no FastAPI, repository, or model client imports.
+Threshold/verdict constants are mirrored locally to avoid cross-module
+coupling in the contract layer; the formulas package remains the single
+source of truth for computation.
 """
 
 from __future__ import annotations
@@ -29,6 +34,34 @@ MIN_EVIDENCE_COUNT = 3
 
 EXPORT_READY_STATUSES = {"approved", "published"}
 """Report statuses that permit export."""
+
+# ── Thesis verdict vocabulary (§3.5.2 式(6)) ─────────────────────────
+# Local mirror of formulas/decision.py ALL_VERDICTS — the formulas
+# package is the single source of truth; this mirror keeps the contract
+# layer pure (no cross-module coupling).
+THESIS_VERDICT_GO = "go"      # 立项
+THESIS_VERDICT_HOLD = "hold"  # 暂缓立项（附补齐项清单）
+THESIS_VERDICT_NOGO = "nogo"  # 不予立项（须配退出 AI 替代方案）
+THESIS_VERDICTS = frozenset({THESIS_VERDICT_GO, THESIS_VERDICT_HOLD, THESIS_VERDICT_NOGO})
+
+# 式(6) decision branches (dec_path) — substring markers, because
+# compute_decision produces full sentences like
+# "式(6)第二条 Δ<0 或 V_net<0 → hold" and registry.py may append
+# suffixes (e.g. " (fusion hard-failures)") or emit a "fallback"
+# string when inputs are insufficient.  We match on the branch marker
+# substring so all legitimate variants validate.
+DEC_PATH_BRANCH_FIRST = "式(6)第一条"    # G_hard=0 → nogo OR G_hard=1 且 Δ≥0 且 V_net≥0 → go
+DEC_PATH_BRANCH_SECOND = "式(6)第二条"   # G_hard=1 且 (Δ<0 或 V_net<0) → hold
+DEC_PATH_BRANCH_FOURTH = "式(6)第四条"   # G_hard=1 且 V_net<0 且 sensitivity confirmed → nogo
+DEC_PATH_FALLBACK = "fallback"            # insufficient inputs for 式(6)
+_DEC_PATH_BRANCHES = frozenset({
+    DEC_PATH_BRANCH_FIRST, DEC_PATH_BRANCH_SECOND, DEC_PATH_BRANCH_FOURTH,
+})
+
+# remediation_items urgency vocabulary — must include "critical" because
+# build_remediation_items emits it for hard-constraint failures, severe
+# gaps, and sensitivity-confirmed-negative net value.
+REMEDIATION_URGENCIES = frozenset({"critical", "high", "medium", "low"})
 
 # ── Validation ────────────────────────────────────────────────────────
 
@@ -184,6 +217,203 @@ def validate_stage4_summary(summary: dict, *, previous_stage_result: dict | None
             "message": "Report has no sections defined",
             "suggested_action": "Add report sections covering risk assessment, SLA results, and recommendations",
         })
+
+    # 10-17. 式(5)-(7) decision artifacts (P4 validators)
+    # These fields are optional (❌ in data-contract §7.1 default None/[]),
+    # but when present must satisfy the §7.3 cross-field constraints.
+    issues.extend(_validate_stage4_formula_artifacts(summary))
+
+    return issues
+
+
+# ── 式(5)-(7) decision-artifact validation ────────────────────────────
+
+
+def _validate_stage4_formula_artifacts(summary: dict) -> list[dict]:
+    """Validate 式(5)-(7) decision artifacts and §7.3 cross-field constraints.
+
+    Checks (P4):
+      10. G_hard is bool when present; g_hard_components is dict when present
+      11. verdict ∈ {go, hold, nogo} when present; dec_path matches a
+          式(6) branch marker (substring) or the fallback marker
+      12. G_hard=0 → verdict=nogo + exit_alternative_required=True (§7.3)
+      13. verdict=hold → remediation_items non-empty (§7.3)
+      14. verdict=nogo → exit_alternative_required=True (§3.5.3)
+      15. remediation_items schema when present ({dim, action, urgency})
+      16. actor_net_value masking: net_value_i<0 → masking_actors non-empty +
+          actor_masking_flag=True (§5.1 aggregation_masking)
+      17. retro_gap schema when present (式(7) {gap, needs_revision})
+    """
+    issues: list[dict] = []
+
+    # 10. G_hard — 式(5) seven-term conjunction result
+    g_hard = summary.get("G_hard")
+    g_hard_components = summary.get("g_hard_components")
+    if g_hard is not None:
+        if not isinstance(g_hard, bool):
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "G_hard",
+                "severity": "high",
+                "message": f"G_hard must be bool (式(5) 合取结果), got {type(g_hard).__name__}",
+                "suggested_action": "Recompute G_hard via compute_g_hard",
+            })
+    if g_hard_components is not None and not isinstance(g_hard_components, dict):
+        issues.append({
+            "issue_type": "invalid_value",
+            "field": "g_hard_components",
+            "severity": "medium",
+            "message": "g_hard_components must be dict (七项明细)",
+            "suggested_action": "Recompute g_hard_components via compute_g_hard",
+        })
+
+    # 11. verdict — 式(6) go/hold/nogo
+    verdict = summary.get("verdict")
+    if verdict is not None and verdict not in THESIS_VERDICTS:
+        issues.append({
+            "issue_type": "invalid_enum",
+            "field": "verdict",
+            "severity": "high",
+            "message": f"verdict must be {set(THESIS_VERDICTS)} (论文口径), got {verdict!r}",
+            "suggested_action": "Recompute verdict via compute_decision",
+        })
+
+    dec_path = summary.get("dec_path")
+    if dec_path is not None and isinstance(dec_path, str):
+        # dec_path is a full sentence from compute_decision (e.g.
+        # "式(6)第二条 Δ<0 或 V_net<0 → hold") possibly with a registry
+        # suffix.  Match on the branch-marker substring, or the
+        # "fallback" marker when inputs were insufficient for 式(6).
+        is_branch = any(marker in dec_path for marker in _DEC_PATH_BRANCHES)
+        is_fallback = DEC_PATH_FALLBACK in dec_path
+        if not (is_branch or is_fallback):
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "dec_path",
+                "severity": "low",
+                "message": f"dec_path {dec_path!r} does not match any 式(6) branch marker ({set(_DEC_PATH_BRANCHES)}) or fallback",
+                "suggested_action": "Check compute_decision dec_path mapping",
+            })
+
+    # 12. G_hard=0 → verdict=nogo + exit_alternative_required=True (§7.3 第一条硬约束否决)
+    exit_alt_required = summary.get("exit_alternative_required")
+    if g_hard is False:
+        if verdict is not None and verdict != THESIS_VERDICT_NOGO:
+            issues.append({
+                "issue_type": "verdict_inconsistency",
+                "field": "verdict",
+                "severity": "high",
+                "message": f"G_hard=False (硬约束否决) but verdict={verdict!r} (should be nogo)",
+                "suggested_action": "G_hard=0 → verdict=nogo per 式(6) 第一条",
+            })
+        if exit_alt_required is not True:
+            issues.append({
+                "issue_type": "exit_alternative_inconsistency",
+                "field": "exit_alternative_required",
+                "severity": "high",
+                "message": "G_hard=False but exit_alternative_required is not True (§3.5.3 nogo 须配替代方案)",
+                "suggested_action": "Set exit_alternative_required=True when verdict=nogo",
+            })
+
+    # 13. verdict=hold → remediation_items non-empty (§7.3)
+    remediation_items = summary.get("remediation_items")
+    if verdict == THESIS_VERDICT_HOLD and not remediation_items:
+        issues.append({
+            "issue_type": "missing_remediation",
+            "field": "remediation_items",
+            "severity": "high",
+            "message": "verdict=hold but remediation_items is empty/missing (§7.3: hold 必附补齐项清单)",
+            "suggested_action": "Populate remediation_items via build_remediation_items",
+        })
+
+    # 14. verdict=nogo → exit_alternative_required=True (§3.5.3)
+    if verdict == THESIS_VERDICT_NOGO and exit_alt_required is not True:
+        issues.append({
+            "issue_type": "exit_alternative_inconsistency",
+            "field": "exit_alternative_required",
+            "severity": "high",
+            "message": "verdict=nogo but exit_alternative_required is not True (§3.5.3)",
+            "suggested_action": "Configure exit-AI alternative or document reason",
+        })
+
+    # 15. remediation_items schema when present
+    if isinstance(remediation_items, list):
+        for i, item in enumerate(remediation_items):
+            if not isinstance(item, dict):
+                continue
+            if not item.get("action"):
+                issues.append({
+                    "issue_type": "incomplete_remediation",
+                    "field": f"remediation_items[{i}].action",
+                    "severity": "medium",
+                    "message": f"remediation_items[{i}] missing action",
+                    "suggested_action": "Add concrete remediation action",
+                })
+            urgency = item.get("urgancy") or item.get("urgency")
+            if urgency is not None and urgency not in REMEDIATION_URGENCIES:
+                issues.append({
+                    "issue_type": "invalid_enum",
+                    "field": f"remediation_items[{i}].urgency",
+                    "severity": "low",
+                    "message": f"remediation urgency {urgency!r} not in {set(REMEDIATION_URGENCIES)}",
+                    "suggested_action": "Use high/medium/low",
+                })
+
+    # 16. actor_net_value masking (§5.1 aggregation_masking)
+    actor_net_value = summary.get("actor_net_value")
+    masking_actors = summary.get("masking_actors")
+    actor_masking_flag = summary.get("actor_masking_flag")
+    if isinstance(actor_net_value, list) and actor_net_value:
+        negative_actors = [
+            a.get("actor", f"<{i}>") for i, a in enumerate(actor_net_value)
+            if isinstance(a, dict) and isinstance(a.get("net_value_i"), (int, float))
+            and a["net_value_i"] < 0
+        ]
+        if negative_actors and not masking_actors:
+            issues.append({
+                "issue_type": "masking_inconsistency",
+                "field": "masking_actors",
+                "severity": "medium",
+                "message": f"actor_net_value has negative members {negative_actors} but masking_actors is empty",
+                "suggested_action": "Populate masking_actors from compute_actor_net_value",
+            })
+        if negative_actors and actor_masking_flag is not True:
+            issues.append({
+                "issue_type": "masking_inconsistency",
+                "field": "actor_masking_flag",
+                "severity": "medium",
+                "message": "actor_net_value has negative members but actor_masking_flag is not True (aggregation masking)",
+                "suggested_action": "Set actor_masking_flag=True when any net_value_i<0",
+            })
+
+    # 17. retro_gap schema — 式(7) 开环预留
+    retro_gap = summary.get("retro_gap")
+    if retro_gap is not None:
+        if not isinstance(retro_gap, dict):
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "retro_gap",
+                "severity": "medium",
+                "message": "retro_gap must be a dict (式(7) {gap, needs_revision})",
+                "suggested_action": "Recompute retro_gap via compute_retro_gap",
+            })
+        else:
+            if "gap" not in retro_gap:
+                issues.append({
+                    "issue_type": "missing_field",
+                    "field": "retro_gap.gap",
+                    "severity": "medium",
+                    "message": "retro_gap missing gap (式(7) 绝对偏差)",
+                    "suggested_action": "Set retro_gap.gap = sla_act_probe - sla_act_retro",
+                })
+            if "needs_revision" not in retro_gap:
+                issues.append({
+                    "issue_type": "missing_field",
+                    "field": "retro_gap.needs_revision",
+                    "severity": "medium",
+                    "message": "retro_gap missing needs_revision (|gap|>3pp → True)",
+                    "suggested_action": "Set retro_gap.needs_revision from compute_retro_gap",
+                })
 
     return issues
 

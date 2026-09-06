@@ -698,11 +698,20 @@ def _build_stage_specific_recommendation(stage_name: str, stage_id: str, stage_r
         if isinstance(s3_payload, dict):
             actual_sla_for_alignment = s3_payload.get("actual_sla")
             gap_for_alignment = s3_payload.get("gap_to_target_pct")
+        # ── 式(5)/(6) extended inputs (optional) ──
+        fatal_error_rate_for_alignment = s3_payload.get("fatal_error_rate") if isinstance(s3_payload, dict) else None
+        general_error_rate_for_alignment = s3_payload.get("general_error_rate") if isinstance(s3_payload, dict) else None
+        audit_completeness_for_alignment = s3_payload.get("audit_completeness") if isinstance(s3_payload, dict) else None
+        net_value_for_alignment = s2_payload.get("net_value") if isinstance(s2_payload, dict) else None
         alignment = compute_3d_alignment(
             risk_level=risk_level_for_alignment,
             target_sla=target_sla_for_alignment,
             actual_sla=actual_sla_for_alignment,
             gap_to_target_pct=gap_for_alignment,
+            fatal_error_rate=fatal_error_rate_for_alignment,
+            general_error_rate=general_error_rate_for_alignment,
+            audit_completeness=audit_completeness_for_alignment,
+            net_value=net_value_for_alignment,
         )
         alignment_recommendation_level = decision_to_recommendation(alignment)
         alignment_requires_human = should_interrupt_for_human(alignment)

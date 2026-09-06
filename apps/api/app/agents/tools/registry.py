@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Optional
 
 from src.apps.api.app.agents.risk_semantic.vocabulary import RiskVocabulary
 
@@ -985,7 +985,7 @@ def value_model_tool(
     risk_level = stage1_summary.get("risk_level", "L1")
     hitl_level = stage1_summary.get("hitl_level", "none")
 
-    # Map risk/HITL to implementation tax
+    # Map risk/HITL to implementation tax (legacy qualitative bucket)
     if risk_level == "L3" or hitl_level == "mandatory":
         impl_tax = "high"
     elif risk_level == "L2" or hitl_level in {"strict", "standard"}:
@@ -993,7 +993,7 @@ def value_model_tool(
     else:
         impl_tax = "low"
 
-    warnings = []
+    warnings: list[str] = []
     if not previous_stage_result:
         warnings.append("No Stage 1 result found; using default low implementation tax.")
     if not stage1_summary:
@@ -1015,20 +1015,21 @@ def value_model_tool(
     def _money(value: float) -> float:
         return round(value, 2)
 
-    missing_parameters: list[str] = []
-    implementation_tax_total = 0.0
-    can_sum_tax = True
-    for item in implementation_tax_items:
-        unit_cost = _num(item.get("unit_cost"))
-        quantity = _num(item.get("quantity"))
-        if unit_cost is None:
-            missing_parameters.append(f"implementation_tax_items.{item.get('item_id', 'unknown')}.unit_cost")
-            can_sum_tax = False
-        if quantity is None:
-            missing_parameters.append(f"implementation_tax_items.{item.get('item_id', 'unknown')}.quantity")
-            can_sum_tax = False
-        if unit_cost is not None and quantity is not None:
-            implementation_tax_total += unit_cost * quantity
+    # ── 式(1): delegate implementation-tax computation to formulas package ──
+    from src.apps.api.app.services.formulas import compute_implementation_tax
+
+    tax_result = compute_implementation_tax(
+        items=implementation_tax_items, hitl_level=hitl_level
+    )
+    implementation_tax_total: float | None
+    if tax_result["missing_parameters"]:
+        # Missing inputs → cannot sum; report None to preserve "do not
+        # fabricate net_value" invariant (§3.3.2).
+        implementation_tax_total = None
+        missing_parameters = list(tax_result["missing_parameters"])
+    else:
+        implementation_tax_total = _money(tax_result["implementation_tax_total"])
+        missing_parameters = []
 
     gross_benefit = _num(value_inputs.get("expected_benefit"))
     ai_operating_cost = _num(value_inputs.get("ai_operating_cost"))
@@ -1039,15 +1040,22 @@ def value_model_tool(
     if _num(value_inputs.get("manual_baseline_cost")) is None:
         missing_parameters.append("manual_baseline_cost")
 
+    # ── 式(2): delegate net-value computation to formulas package ──
+    from src.apps.api.app.services.formulas import compute_net_value
+
     can_calculate_net = (
         gross_benefit is not None
         and ai_operating_cost is not None
-        and can_sum_tax
+        and implementation_tax_total is not None
     )
-    net_value = None
+    net_value: float | None = None
     if can_calculate_net:
-        implementation_tax_total = _money(implementation_tax_total)
-        net_value = _money(gross_benefit - ai_operating_cost - implementation_tax_total)
+        nv_result = compute_net_value(
+            gross_benefit=gross_benefit,
+            ai_operating_cost=ai_operating_cost,
+            implementation_tax_total=implementation_tax_total,
+        )
+        net_value = _money(nv_result["net_value"]) if nv_result["net_value"] is not None else None
 
     required_supplements = [
         {
@@ -1058,8 +1066,16 @@ def value_model_tool(
         for field in sorted(set(missing_parameters))
     ]
 
-    sensitivity_results = []
+    # ── §3.3.4: delegate sensitivity analysis to formulas package ──
+    from src.apps.api.app.services.formulas import compute_sensitivity
+
+    sensitivity_results: list[dict] = []
     if can_calculate_net:
+        # Build perturbation rows.  The legacy tool computed low_net/high_net
+        # inline per param name; we preserve that logic to populate the
+        # sensitivity params dict, then hand to compute_sensitivity for the
+        # conclusion_flip verdict.
+        sens_rows: list[dict] = []
         base_tax_total = implementation_tax_total
         for param in sensitivity_params:
             name = param.get("param", "")
@@ -1109,11 +1125,22 @@ def value_model_tool(
                 base = _num(param.get("base")) or 0.0
                 low_net = (gross_benefit - base + low) - ai_operating_cost - base_tax_total
                 high_net = (gross_benefit - base + high) - ai_operating_cost - base_tax_total
-            sensitivity_results.append({
+            sens_rows.append({
                 "param": name,
-                "low_net_value": _money(low_net),
-                "high_net_value": _money(high_net),
-                "conclusion_flip": low_net <= 0 <= high_net or high_net <= 0 <= low_net,
+                "low": low,
+                "high": high,
+                "low_net": low_net,
+                "high_net": high_net,
+                "regulatory_floor": param.get("regulatory_floor", False),
+            })
+        sens_result = compute_sensitivity(params=sens_rows)
+        # Translate back to the legacy sensitivity_results shape.
+        for row in sens_result["sensitivity_table"]:
+            sensitivity_results.append({
+                "param": row["param"],
+                "low_net_value": _money(row["low_net"]) if row["low_net"] is not None else None,
+                "high_net_value": _money(row["high_net"]) if row["high_net"] is not None else None,
+                "conclusion_flip": row["conclusion_flip"],
             })
 
     break_even_conditions = []
@@ -1147,7 +1174,7 @@ def value_model_tool(
             "estimated_value": "medium",
             "implementation_tax": impl_tax,
             "implementation_tax_items": implementation_tax_items,
-            "implementation_tax_total": _money(implementation_tax_total) if can_sum_tax else None,
+            "implementation_tax_total": implementation_tax_total,
             "gross_benefit": _money(gross_benefit) if gross_benefit is not None else None,
             "ai_operating_cost": _money(ai_operating_cost) if ai_operating_cost is not None else None,
             "net_value": net_value,
@@ -1176,54 +1203,144 @@ def sla_target_tool(
     vision_results: list[dict] | None = None,
     previous_stage_result: dict | None = None,
 ) -> ToolResult:
-    # Consume Stage 1 risk level to influence target SLA
+    """Stage 2 tool: derive target SLA via 式(3) back-deduction.
+
+    Replaces the old fixed sla_map {L3:99%, L2:97%, L1:95%} with the
+    thesis formula: SLA_tgt = SLA_floor,d(R) + α_d · r, where r is the
+    net-value gain ratio.  When net_value is unavailable (Stage 2 value
+    model not yet run), the target degenerates to the risk floor
+    (r=0) — this is the "准入门槛" interpretation, not a prediction.
+    """
+    from src.apps.api.app.services.formulas import (
+        compute_target_sla,
+        resolve_floor_comprehensive,
+    )
+
+    # Consume Stage 1 risk level
     stage1_summary = (previous_stage_result or {}).get("scenario_summary", {})
     risk_level = stage1_summary.get("risk_level", "L1")
+    hitl_level = stage1_summary.get("hitl_level", "none")
 
-    # L3 → higher target SLA (99%); L2 → 97%; L1 → 95%
-    sla_map = {"L3": "99%", "L2": "97%", "L1": "95%"}
-    target_sla = sla_map.get(risk_level, "95%")
+    # Source net_value: prefer Stage 2 partial output (value_model_tool
+    # ran earlier in the same stage), then value_inputs pre-seed.
+    net_value: float | None = None
+    if previous_stage_result:
+        # value_model_tool raw_output is often hoisted to top level
+        net_value = _sla_num(previous_stage_result.get("net_value"))
+        if net_value is None:
+            stage2_partial = previous_stage_result.get("stage2_summary") or {}
+            net_value = _sla_num(stage2_partial.get("net_value"))
+        if net_value is None:
+            value_inputs = previous_stage_result.get("value_inputs") or {}
+            net_value = _sla_num(value_inputs.get("net_value"))
 
-    warnings = []
+    warnings: list[str] = []
     stability = "confirmed"
+
     if not previous_stage_result:
         stability = "needs_confirmation"
-        warnings.append("No Stage 1 result found; using default SLA target.")
+        warnings.append("No Stage 1 result found; target SLA degenerates to risk floor.")
     if not stage1_summary:
         stability = "needs_confirmation"
         warnings.append("No scenario_summary in Stage 1 result; SLA target may need adjustment.")
 
-    value_inputs = (previous_stage_result or {}).get("value_inputs", {})
-    manual_time = value_inputs.get("manual_baseline_time")
+    # ── 式(3)(3a): back-deduce target SLA from net_value ──
+    if net_value is not None:
+        sla_result = compute_target_sla(
+            risk_level=risk_level,
+            net_value=net_value,
+        )
+        target_sla = sla_result["target_sla"]
+        r = sla_result["r"]
+        target_sla_by_dim = sla_result["target_sla_by_dim"]
+        v_min = sla_result["v_min"]
+        v_max = sla_result["v_max"]
+        # Override stability from gain-ratio clamping/degenerate state
+        stability = sla_result["stability"]
+        if stability == "needs_confirmation":
+            warnings.append(
+                f"Gain ratio r={r} is degenerate or clamped; target SLA "
+                f"({target_sla:.1f}) requires HITL confirmation."
+            )
+    else:
+        # Degenerate: r=0 → target SLA = risk floor (准入门槛)
+        floor = resolve_floor_comprehensive(risk_level)
+        if floor is None:
+            floor = 85.0  # L1 default for unknown risk levels
+            warnings.append(f"Unknown risk_level {risk_level!r}; defaulting to L1 floor.")
+        target_sla = round(floor, 2)
+        r = 0.0
+        target_sla_by_dim = None
+        v_min = None
+        v_max = None
+        stability = "needs_confirmation"
+        warnings.append(
+            "net_value not available; target SLA degenerates to risk floor "
+            f"({target_sla:.1f}). Run value_model_tool first for back-deduction."
+        )
+
+    # Build per-dimension components for backward compatibility
+    target_sla_pct_str = f"{target_sla:.1f}%"
     target_sla_components = {
         "quality": {
-            "target": target_sla,
-            "basis": f"{risk_level} risk level and Stage 1 evidence controls",
+            "target": target_sla_pct_str,
+            "basis": f"{risk_level} risk level; 式(3) back-deduction (r={r:.2f})",
         },
         "efficiency": {
             "target": "manual_baseline_time_reduction_without_HITL_bypass",
-            "manual_baseline_time": manual_time,
+            "manual_baseline_time": (previous_stage_result or {}).get(
+                "value_inputs", {}
+            ).get("manual_baseline_time"),
         },
         "governance": {
-            "target": "mandatory_human_confirmation" if risk_level == "L3" or stage1_summary.get("hitl_level") == "mandatory" else "sampled_or_standard_review",
-            "hitl_level": stage1_summary.get("hitl_level", "none"),
+            "target": "mandatory_human_confirmation" if risk_level == "L3" or hitl_level == "mandatory" else "sampled_or_standard_review",
+            "hitl_level": hitl_level,
         },
     }
+
+    raw_output: dict[str, Any] = {
+        "target_sla": target_sla,
+        "target_sla_pct": target_sla_pct_str,
+        "target_sla_components": target_sla_components,
+        "stability": stability,
+        "stage1_risk_level": risk_level,
+        "goal": goal,
+        "stage_name": stage_name,
+    }
+    # Include 式(3) back-deduction artifacts when available
+    if net_value is not None:
+        raw_output["r"] = r
+        raw_output["target_sla_by_dim"] = target_sla_by_dim
+        raw_output["v_min"] = v_min
+        raw_output["v_max"] = v_max
+        raw_output["net_value"] = net_value
+        raw_output["formula"] = "SLA_tgt = Σ_d w_d · (SLA_floor,d(R) + α_d · r)"
+    else:
+        raw_output["r"] = 0.0
+        raw_output["formula"] = "SLA_tgt = SLA_floor(R) (degenerate, r=0)"
 
     return ToolResult(
         name="sla_target",
         summary="已生成目标 SLA 建议。",
-        raw_output={
-            "target_sla": target_sla,
-            "target_sla_components": target_sla_components,
-            "stability": stability,
-            "stage1_risk_level": risk_level,
-            "goal": goal,
-            "stage_name": stage_name,
-        },
+        raw_output=raw_output,
         evidence_refs=[],
         warnings=warnings,
     )
+
+
+def _sla_num(value: Any) -> float | None:
+    """Extract a float from a value, rejecting bool/None/str."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    # Try stripping "%" from strings
+    if isinstance(value, str):
+        try:
+            return float(value.strip().rstrip("%"))
+        except ValueError:
+            return None
+    return None
 
 
 def sample_score_tool(
@@ -1234,17 +1351,41 @@ def sample_score_tool(
     vision_results: list[dict] | None = None,
     previous_stage_result: dict | None = None,
 ) -> ToolResult:
-    """Stage 3 tool: generate risk-aware sample score data.
+    """Stage 3 tool: generate atomic tasks + rubric + sample scores.
+
+    P2-6 refactor: replaces fixed risk-level scalars with 式(4) structural
+    inputs — atomic_task_decomposer (P2-1) + rubric_designer (P2-2) +
+    compute_actual_sla (P2-3) + compute_error_rates (P2-5).  The actual
+    SLA is now computed from the rubric seed, not a fixed 94.
 
     L3 scenarios produce more low-score samples; L1 fewer.
     Consumes previous_stage_result for risk differentiation.
     """
-    import random as _random
+    from src.apps.api.app.agents.subagents import (
+        decompose_atomic_tasks,
+        design_rubric,
+    )
 
     stage1_summary = (previous_stage_result or {}).get("scenario_summary", {})
     risk_level = stage1_summary.get("risk_level", "L1")
+    scenario_key = (previous_stage_result or {}).get("scenario_key") or (
+        "loan_post" if risk_level == "L3" else None
+    )
 
-    # Risk-aware sample generation
+    # ── P2-1: decompose atomic tasks from SOP ──
+    task_result = decompose_atomic_tasks(
+        scenario_key=scenario_key,
+        process_nodes=(previous_stage_result or {}).get("process_nodes"),
+    )
+    atomic_tasks = task_result.atomic_tasks
+
+    # ── P2-2: design three-dimension rubric ──
+    rubric_result = design_rubric(
+        scenario_key=scenario_key, atomic_tasks=atomic_tasks
+    )
+    rubric = rubric_result.rubric
+
+    # Risk-aware sample generation (probe mock — P3 will replace with real probe)
     base_sample_size = 12
     if risk_level == "L3":
         sample_size = base_sample_size + 4  # More samples for high-risk
@@ -1275,6 +1416,8 @@ def sample_score_tool(
             "low_score_samples": low_score_samples,
             "score_distribution": score_distribution,
             "risk_level": risk_level,
+            "atomic_tasks": atomic_tasks,
+            "rubric": rubric,
             "evidence_refs": evidence_refs,
             "goal": goal,
             "stage_name": stage_name,
@@ -1292,36 +1435,96 @@ def actual_sla_summary_tool(
     vision_results: list[dict] | None = None,
     previous_stage_result: dict | None = None,
 ) -> ToolResult:
-    """Stage 3 tool: compute actual SLA from sample scores.
+    """Stage 3 tool: compute actual SLA from rubric scores (式(4)).
 
-    Reads target_sla from Stage 2 result. Computes gap_to_target_pct as int,
-    using gap = Actual SLA − Target SLA (negative = under target).
+    P2-6 refactor: replaces fixed risk-level scalars (L3=94/L2=92/L1=90)
+    with 式(4) three-dim weighted aggregation via compute_actual_sla,
+    plus compute_error_rates (fatal/general/audit completeness) and
+    grade_gap five-tier grading.  The actual SLA is now computed from
+    rubric scores, not a fixed constant — when no probe scores are
+    available it falls back to a risk-floor-derived mock.
     """
-    # Get Stage 1 risk for SLA baseline
+    from src.apps.api.app.services.formulas import (
+        compute_actual_sla,
+        compute_error_rates,
+        grade_gap,
+    )
+
     stage1_summary = (previous_stage_result or {}).get("scenario_summary", {})
     risk_level = stage1_summary.get("risk_level", "L1")
 
-    # Derive actual SLA based on risk level
-    if risk_level == "L3":
-        actual_sla = 94.0  # Harder to meet high target
-        target_sla_pct = 99.0
-    elif risk_level == "L2":
-        actual_sla = 92.0
-        target_sla_pct = 97.0
+    # Source target_sla from Stage 2 result (sla_target_tool output)
+    target_sla: float
+    stage2 = previous_stage_result or {}
+    if stage2.get("target_sla") is not None:
+        target_sla = _sla_num(stage2.get("target_sla")) or _risk_floor(risk_level)
+    elif (stage2.get("stage2_summary") or {}).get("target_sla") is not None:
+        target_sla = _sla_num(stage2["stage2_summary"]["target_sla"]) or _risk_floor(risk_level)
     else:
-        actual_sla = 90.0
-        target_sla_pct = 95.0
+        target_sla = _risk_floor(risk_level)
 
-    gap_to_target_pct = int(actual_sla - target_sla_pct)
+    # Source rubric_scores + samples from probe execution (P3) or
+    # previous_stage_result.  When unavailable, fall back to a mock
+    # probe derived from the risk floor so the tool remains callable
+    # in isolation (Stage 3 contract still validates structure).
+    rubric_scores = (previous_stage_result or {}).get("rubric_scores") or []
+    probe_samples = (previous_stage_result or {}).get("probe_samples") or []
+
+    if rubric_scores:
+        sla_result = compute_actual_sla(rubric_scores=rubric_scores)
+        actual_sla = sla_result["actual_sla"]
+        actual_sla_by_dim = sla_result["actual_sla_by_dim"]
+        score_distribution = sla_result["score_distribution"]
+    else:
+        # Fallback: mock actual SLA slightly below target (probe not run)
+        actual_sla = round(target_sla - 5.0, 2)
+        actual_sla_by_dim = None
+        score_distribution = {"high": 0, "medium": 0, "low": 0}
+
+    # Error rates + audit completeness (§3.4.4/§3.5.2)
+    if probe_samples:
+        err_result = compute_error_rates(samples=probe_samples, risk_level=risk_level)
+        fatal_error_rate = err_result["fatal_error_rate"]
+        general_error_rate = err_result["general_error_rate"]
+        audit_completeness = err_result["audit_completeness"]
+        critical_field_completeness = err_result["critical_field_completeness"]
+        fatal_violation = err_result["fatal_violation"]
+        general_violation = err_result["general_violation"]
+        audit_violation = err_result["audit_violation"]
+    else:
+        # Fallback: zero-error mock (probe not run)
+        fatal_error_rate = 0.0
+        general_error_rate = 0.0
+        audit_completeness = 1.0
+        critical_field_completeness = 1.0
+        fatal_violation = False
+        general_violation = False
+        audit_violation = False
+
+    # Gap grading (§3.4.4 five-tier + L3 escalation)
+    delta_sla = round(actual_sla - target_sla, 2)
+    gap_result = grade_gap(
+        delta_sla=delta_sla, target_sla=target_sla, risk_level=risk_level
+    )
+    gap_grade = gap_result["gap_grade"]
+    relative_gap_pct = gap_result["relative_gap_pct"]
+    l3_escalation = gap_result["l3_escalation"]
+
+    gap_to_target_pct = int(delta_sla)
 
     stability = "confirmed"
-    warnings = []
+    warnings: list[str] = []
     if not previous_stage_result:
         stability = "needs_confirmation"
         warnings.append("No Stage 1 result found; using default SLA summary.")
     if gap_to_target_pct < -5:
         stability = "unstable"
         warnings.append(f"SLA is {abs(gap_to_target_pct)}pp under target, exceeding 5pp threshold.")
+    if fatal_violation:
+        stability = "unstable"
+        warnings.append("Fatal error detected (硬约束: fatal_error_rate must be 0).")
+    if l3_escalation:
+        warnings.append("L3 gap exceeds 5% → escalated to hard constraint (sla_gap_l3).")
 
     evidence_refs = []
     if evidence_items:
@@ -1332,8 +1535,20 @@ def actual_sla_summary_tool(
         summary="已汇总 Actual SLA。",
         raw_output={
             "actual_sla": actual_sla,
+            "actual_sla_by_dim": actual_sla_by_dim,
+            "target_sla": target_sla,
             "gap_to_target_pct": gap_to_target_pct,
-            "target_sla": target_sla_pct,
+            "gap_grade": gap_grade,
+            "relative_gap_pct": relative_gap_pct,
+            "l3_escalation": l3_escalation,
+            "fatal_error_rate": fatal_error_rate,
+            "general_error_rate": general_error_rate,
+            "audit_completeness": audit_completeness,
+            "critical_field_completeness": critical_field_completeness,
+            "fatal_violation": fatal_violation,
+            "general_violation": general_violation,
+            "audit_violation": audit_violation,
+            "score_distribution": score_distribution,
             "stability": stability,
             "risk_level": risk_level,
             "evidence_refs": evidence_refs,
@@ -1343,6 +1558,12 @@ def actual_sla_summary_tool(
         evidence_refs=evidence_refs,
         warnings=warnings,
     )
+
+
+def _risk_floor(risk_level: str) -> float:
+    """Return the comprehensive SLA floor for a risk level (式(3))."""
+    floors = {"L1": 85.0, "L2": 90.0, "L3": 95.0}
+    return floors.get(risk_level, 85.0)
 
 
 def evidence_bundle_tool(
@@ -1415,15 +1636,109 @@ def report_generate_tool(
     """Stage 4 tool: generate structured report outline from Stage 1-3 results.
 
     Produces risk-aware report sections and decision_card.
+
+    P4-5 enhancement (§3.5.3 report-writer-agent): now integrates the
+    evidence-fusion Sub-agent (P4-3) to produce the three-dimension
+    evidence fusion table section + per-actor section + remediation
+    items section, and emits a ``decision_card.verdict`` of go/hold/nogo
+    derived from 式(6) ``compute_decision`` (replacing the old fixed
+    risk-level scalars).  The verdict is computed from G_hard (式(5)) +
+    delta_sla + net_value when those inputs are available; otherwise it
+    falls back to the risk-level heuristic.
     """
+    from src.apps.api.app.agents.subagents import fuse_three_dim_evidence
+    from src.apps.api.app.services.formulas import compute_decision
+
     stage1_summary = (previous_stage_result or {}).get("scenario_summary", {})
     risk_level = stage1_summary.get("risk_level", "L1")
 
-    # Risk-aware report sections
+    # ── P4-3: evidence fusion (§3.5.1) ──
+    stage2_summary = (previous_stage_result or {}).get("stage2_summary", {})
+    stage3_summary = (previous_stage_result or {}).get("stage3_summary", {})
+    # actual_sla_summary_tool emits flat fields; normalize to a summary dict
+    if not stage3_summary and previous_stage_result:
+        stage3_summary = {
+            k: previous_stage_result.get(k)
+            for k in (
+                "actual_sla",
+                "actual_sla_by_dim",
+                "fatal_error_rate",
+                "general_error_rate",
+                "audit_completeness",
+                "gap_grade",
+                "per_task",
+            )
+            if k in (previous_stage_result or {})
+        }
+
+    atomic_tasks = (previous_stage_result or {}).get("atomic_tasks") or []
+
+    fusion_result = fuse_three_dim_evidence(
+        stage1_summary=stage1_summary,
+        stage2_summary=stage2_summary,
+        stage3_summary=stage3_summary,
+        atomic_tasks=atomic_tasks,
+        risk_level=risk_level,
+    )
+
+    # ── 式(6) decision verdict (go/hold/nogo) ──
+    target_sla = _sla_num(stage2_summary.get("target_sla")) if stage2_summary else None
+    actual_sla = _sla_num(stage3_summary.get("actual_sla")) if stage3_summary else None
+    net_value = _sla_num(stage2_summary.get("net_value")) if stage2_summary else None
+
+    delta_sla: Optional[float] = None
+    if actual_sla is not None and target_sla is not None:
+        delta_sla = round(actual_sla - target_sla, 2)
+
+    # G_hard from fusion hard-constraint failures (否决级)
+    hard_failures = fusion_result.hard_constraint_failures
+    g_hard = len(hard_failures) == 0
+
+    # Only run compute_decision when we have enough inputs; else fall back
+    verdict: str
+    decision_rationale: str
+    remediation_items: list[dict] = []
+    dec_path: str = ""
+
+    if g_hard and delta_sla is not None and net_value is not None:
+        # Full 式(6) decision
+        dec = compute_decision(
+            g_hard=g_hard,
+            delta_sla=delta_sla,
+            net_value=net_value,
+            risk_level=risk_level,
+            target_sla=target_sla,
+            failed_terms=hard_failures,
+        )
+        verdict = dec["verdict"]
+        decision_rationale = dec["decision_rationale"]
+        remediation_items = dec.get("remediation_items", [])
+        dec_path = dec.get("dec_path", "")
+    elif not g_hard:
+        verdict = "nogo"
+        decision_rationale = "硬约束未通过（G_hard=0），建议不予立项并补配退出 AI 替代方案。"
+        dec_path = "式(6)第一条 G_hard=0 → nogo (fusion hard-failures)"
+    else:
+        # Fallback: risk-level heuristic (insufficient inputs for full 式(6))
+        if risk_level == "L3":
+            verdict = "hold"
+            decision_rationale = "L3 场景输入不足，按风险底线暂缓论证。"
+        elif risk_level == "L2":
+            verdict = "hold"
+            decision_rationale = "L2 场景输入不足，建议补充论证。"
+        else:
+            verdict = "go"
+            decision_rationale = "低风险场景且无硬约束失败，建议立项。"
+        dec_path = "fallback (insufficient inputs for 式(6))"
+
+    # ── Risk-aware report sections ──
     base_sections = [
         {"title": "场景概述", "status": "draft"},
         {"title": "价值建模结论", "status": "draft"},
         {"title": "样本评分结果", "status": "draft"},
+        {"title": "三维证据融合表", "status": "draft"},  # P4-5 new section
+        {"title": "逐 actor 盈利性", "status": "draft"},  # P4-5 new section
+        {"title": "补齐项清单", "status": "draft" if remediation_items else "n/a"},
     ]
     if risk_level in {"L2", "L3"}:
         base_sections.extend([
@@ -1436,31 +1751,22 @@ def report_generate_tool(
             {"title": "致命错误分析", "status": "draft"},
         ])
 
-    # Decision card based on risk
-    if risk_level == "L3":
-        decision_card = {
-            "recommendation": "pause",
-            "confidence": 0.4,
-            "risk_level": risk_level,
-            "notes": "L3 场景需严格 HITL 审核后方可推进",
-        }
-        report_status = "draft"
-    elif risk_level == "L2":
-        decision_card = {
-            "recommendation": "proceed",
-            "confidence": 0.7,
-            "risk_level": risk_level,
-            "notes": "建议标准 HITL 审核后推进",
-        }
-        report_status = "review"
-    else:
-        decision_card = {
-            "recommendation": "proceed",
-            "confidence": 0.9,
-            "risk_level": risk_level,
-            "notes": "低风险场景可直接推进",
-        }
-        report_status = "review"
+    # ── Decision card (§3.5.3 verdict = go/hold/nogo) ──
+    confidence = 0.9 if verdict == "go" else (0.5 if verdict == "hold" else 0.3)
+    decision_card = {
+        "verdict": verdict,
+        "recommendation": verdict,  # legacy field (go/hold/nogo)
+        "confidence": confidence,
+        "risk_level": risk_level,
+        "decision_rationale": decision_rationale,
+        "dec_path": dec_path,
+        "g_hard": g_hard,
+        "delta_sla": delta_sla,
+        "net_value": net_value,
+        "hard_constraint_failures": hard_failures,
+        "remediation_items": remediation_items,
+        "notes": decision_rationale,
+    }
 
     evidence_refs = []
     if evidence_items:
@@ -1469,14 +1775,23 @@ def report_generate_tool(
     warnings = []
     if not previous_stage_result:
         warnings.append("No Stage 1 result found; using L1 defaults for report generation.")
+    if fusion_result.evidence_conflicts:
+        warnings.append(
+            f"三维证据冲突 {len(fusion_result.evidence_conflicts)} 项，须回 §3.5.2 硬约束检查解决。"
+        )
+
+    report_status = "draft" if verdict == "hold" or not g_hard else "review"
 
     return ToolResult(
         name="report_generate",
-        summary="已生成报告草稿摘要。",
+        summary=f"已生成报告草稿，决策结论：{verdict}。",
         raw_output={
             "report_status": report_status,
             "sections": base_sections,
             "decision_card": decision_card,
+            "three_dim_fusion_table": fusion_result.three_dim_fusion_table,
+            "evidence_conflicts": fusion_result.evidence_conflicts,
+            "strength_summary": fusion_result.strength_summary,
             "risk_level": risk_level,
             "evidence_refs": evidence_refs,
             "goal": goal,

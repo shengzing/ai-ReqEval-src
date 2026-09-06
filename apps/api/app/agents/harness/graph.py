@@ -485,11 +485,22 @@ def build_skill_graph(
             target_sla = current_stage2.get("target_sla")
         actual_sla = current_stage3.get("actual_sla") if isinstance(current_stage3, dict) else None
         gap_pct = current_stage3.get("gap_to_target_pct") if isinstance(current_stage3, dict) else None
+        # ── 式(5)/(6) extended inputs (optional, from stage summaries) ──
+        # When present, compute_3d_alignment switches to full mode and
+        # returns G_hard + verdict (go/hold/nogo) + remediation items.
+        fatal_error_rate = current_stage3.get("fatal_error_rate") if isinstance(current_stage3, dict) else None
+        general_error_rate = current_stage3.get("general_error_rate") if isinstance(current_stage3, dict) else None
+        audit_completeness = current_stage3.get("audit_completeness") if isinstance(current_stage3, dict) else None
+        net_value = current_stage2.get("net_value") if isinstance(current_stage2, dict) else None
         alignment = compute_3d_alignment(
             risk_level=risk_level,
             target_sla=target_sla,
             actual_sla=actual_sla,
             gap_to_target_pct=gap_pct,
+            fatal_error_rate=fatal_error_rate,
+            general_error_rate=general_error_rate,
+            audit_completeness=audit_completeness,
+            net_value=net_value,
         )
         if alignment.get("decision") and alignment["decision"] != "insufficient":
             alignment_requires_human = should_interrupt_for_human(alignment)

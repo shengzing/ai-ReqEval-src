@@ -190,7 +190,117 @@ def validate_stage2_summary(summary: dict, *, previous_stage_result: dict | None
             "suggested_action": "Confirm SLA parameters with domain expert before proceeding",
         })
 
+    # 8-12. 式(1)/(2)/(3) artifact checks (net_value, tax_total,
+    # aggregation_masking, reciprocity, r/floor consistency)
+    issues.extend(_validate_stage2_formula_artifacts(summary, risk_level=risk_level))
+
     return issues
+
+
+def _validate_stage2_formula_artifacts(
+    summary: dict, *, risk_level: str | None
+) -> list[dict]:
+    """Validate Stage 2 式(1)/(2)/(3) artifacts (§3.3.2-§3.3.3).
+
+    Checks:
+      * net_value presence (L3 should be computed, not None)
+      * implementation_tax_total presence (式1)
+      * aggregation_masking: ∀i V_net,i ≥ 0
+      * reciprocity_violations: no dangling e3-value ports
+      * r=0 → target_sla ≥ SLA_floor(R) (degenerate floor invariant)
+    """
+    issues: list[dict] = []
+
+    # 8. net_value presence (§3.3.3 式(2))
+    net_value = summary.get("net_value")
+    if net_value is None and risk_level == "L3":
+        issues.append({
+            "issue_type": "missing_field",
+            "field": "net_value",
+            "severity": "high",
+            "message": "L3 risk scenario has no net_value; Stage 2 value model not yet computed",
+            "suggested_action": "Run value_model_tool with implementation_tax_items and benefit/cost inputs",
+        })
+
+    # 9. implementation_tax_total presence (§3.3.2 式(1))
+    impl_tax_total = summary.get("implementation_tax_total")
+    if impl_tax_total is None and risk_level == "L3":
+        issues.append({
+            "issue_type": "missing_field",
+            "field": "implementation_tax_total",
+            "severity": "medium",
+            "message": "implementation_tax_total is missing; cannot verify 式(1) seven-category tax",
+            "suggested_action": "Populate implementation_tax_items and compute implementation_tax_total",
+        })
+
+    # 10. aggregation_masking detection (§3.3.3 per-actor profitability)
+    actor_net_value = summary.get("actor_net_value")
+    if isinstance(actor_net_value, list) and actor_net_value:
+        masking_actors = [
+            row.get("actor", "?") for row in actor_net_value
+            if isinstance(row, dict)
+            and _num(row.get("net_value_i")) is not None
+            and _num(row["net_value_i"]) < 0
+        ]
+        if masking_actors:
+            issues.append({
+                "issue_type": "aggregation_masking",
+                "field": "actor_net_value",
+                "severity": "high",
+                "message": (
+                    f"Per-actor profitability violated: {masking_actors} have "
+                    f"net_value_i < 0 while ecosystem-level may be ≥0"
+                ),
+                "suggested_action": "Rebalance benefit/cost allocation so ∀i V_net,i ≥ 0",
+            })
+
+    # 11. reciprocity violations (e3-value, §3.3.3)
+    reciprocity_violations = summary.get("reciprocity_violations")
+    if isinstance(reciprocity_violations, list) and reciprocity_violations:
+        issues.append({
+            "issue_type": "reciprocity_violation",
+            "field": "reciprocity_violations",
+            "severity": "medium",
+            "message": f"{len(reciprocity_violations)} dangling value port(s) detected (e3-value reciprocity)",
+            "suggested_action": "Add missing value exchanges so every port has a source/destination",
+        })
+
+    # 12. r=0 → target_sla ≥ SLA_floor(R) (degenerate floor invariant)
+    r = summary.get("r")
+    target_sla_by_dim = summary.get("target_sla_by_dim")
+    if target_sla_by_dim is not None and r is not None:
+        r_f = _num(r)
+        target_sla = summary.get("target_sla")
+        if r_f is not None and abs(r_f) < 1e-9 and isinstance(target_sla, (int, float)):
+            floor = SLA_FLOOR_BY_RISK_LOOKUP.get(risk_level or "")
+            if floor is not None and target_sla < floor - 0.5:
+                issues.append({
+                    "issue_type": "sla_floor_violation",
+                    "field": "target_sla",
+                    "severity": "high",
+                    "message": f"r=0 but target_sla ({target_sla}) below risk floor ({floor})",
+                    "suggested_action": "Target SLA should not fall below SLA_floor(R) even when degenerate",
+                })
+
+    return issues
+
+
+def _num(value: object) -> float | None:
+    """Extract a float from a value, rejecting bool/None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+# Risk-level comprehensive SLA floor (mirrors formulas.thresholds.SLA_FLOOR_BY_RISK
+# — kept local to avoid a cross-module import in the contract layer).
+SLA_FLOOR_BY_RISK_LOOKUP: dict[str, float] = {
+    "L1": 85.0,
+    "L2": 90.0,
+    "L3": 95.0,
+}
 
 
 # ── Quality scoring ────────────────────────────────────────────────────

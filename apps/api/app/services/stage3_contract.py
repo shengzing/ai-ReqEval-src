@@ -7,8 +7,14 @@ Stage 3 (Business Viability / Sample Probing) validates:
 - actual_sla validity
 - evidence_refs presence
 - risk_level propagation from Stage 1
+- 式(4) structural fields: atomic_tasks, rubric, actual_sla_by_dim
+- error-rate hard constraints: fatal=0, general≤e_crit_max(R), audit≥A_audit_min(R)
+- gap_grade five-tier + L3 escalation (§3.4.4)
 
 Pure module — no FastAPI, repository, or model client imports.
+Threshold constants are mirrored locally to avoid cross-module coupling
+in the contract layer; the formulas package remains the single source of
+truth for computation.
 """
 
 from __future__ import annotations
@@ -22,6 +28,32 @@ MAX_SAMPLE_SIZE = 10000
 MIN_GAP_PCT = -100  # actual can exceed target
 MAX_GAP_PCT = 100
 ACTUAL_SLA_RANGE = (0.0, 100.0)
+
+# ── Error-rate thresholds (mirror of formulas/thresholds.py §3.5.2) ──
+# Local mirror to keep the contract layer pure; the formulas package is
+# the single source of truth for computation.  These are initial
+# reference values pending M2-M4 empirical calibration.
+E_CRIT_MAX_BY_RISK: dict[str, float] = {
+    "L1": 0.15,
+    "L2": 0.10,
+    "L3": 0.05,
+}
+A_AUDIT_MIN_BY_RISK: dict[str, float] = {
+    "L1": 0.70,
+    "L2": 0.85,
+    "L3": 0.95,
+}
+
+# ── Gap grade vocabulary (§3.4.4) ─────────────────────────────────────
+GAP_GRADE_PASS = "达标"
+GAP_GRADE_MICRO = "微差"
+GAP_GRADE_SIGNIFICANT = "显著差"
+GAP_GRADE_LARGE = "大差"
+GAP_GRADE_SEVERE = "严重失配"
+_VALID_GAP_GRADES = {
+    GAP_GRADE_PASS, GAP_GRADE_MICRO, GAP_GRADE_SIGNIFICANT,
+    GAP_GRADE_LARGE, GAP_GRADE_SEVERE,
+}
 
 # ── Normalization ─────────────────────────────────────────────────────
 
@@ -245,6 +277,160 @@ def validate_stage3_summary(summary: dict, *, previous_stage_result: dict | None
             "message": f"stability must be confirmed|needs_confirmation|unstable, got {stability!r}",
             "suggested_action": "Set stability from actual_sla_summary tool output",
         })
+
+    # ── 式(4) structural fields (P2-7) ──
+    issues.extend(_validate_stage3_formula_artifacts(summary, risk_level))
+
+    return issues
+
+
+def _validate_stage3_formula_artifacts(
+    summary: dict, risk_level: Any
+) -> list[dict]:
+    """Validate 式(4) structural artifacts and error-rate hard constraints.
+
+    Checks (P2-7):
+      10. atomic_tasks presence + field schema
+      11. rubric three-dimension structure + hard-constraint items
+      12. actual_sla_by_dim three-dim breakdown
+      13. fatal_error_rate == 0 (硬约束: any fatal → nogo)
+      14. general_error_rate ≤ e_crit_max(R)
+      15. audit_completeness ≥ A_audit_min(R)
+      16. gap_grade five-tier + L3 escalation consistency
+    """
+    issues: list[dict] = []
+
+    # 10. atomic_tasks — optional but when present must be non-empty list
+    atomic_tasks = summary.get("atomic_tasks")
+    if atomic_tasks is not None:
+        if not isinstance(atomic_tasks, list) or not atomic_tasks:
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "atomic_tasks",
+                "severity": "medium",
+                "message": "atomic_tasks is present but empty or not a list",
+                "suggested_action": "Run atomic_task_decomposer to produce atomic tasks",
+            })
+        else:
+            # Check each task has the required dual-axis + sla_dim fields
+            required = ("task_id", "non_routine", "interdependence", "sla_dim")
+            for task in atomic_tasks:
+                if not isinstance(task, dict):
+                    continue
+                tid = task.get("task_id", "<unknown>")
+                missing = [f for f in required if f not in task or task[f] is None]
+                if missing:
+                    issues.append({
+                        "issue_type": "missing_field",
+                        "field": f"atomic_tasks.{tid}",
+                        "severity": "medium",
+                        "message": f"atomic task {tid} missing fields: {missing}",
+                        "suggested_action": f"Complete {missing} for task {tid}",
+                    })
+
+    # 11. rubric — three-dimension structure
+    rubric = summary.get("rubric")
+    if rubric is not None:
+        if not isinstance(rubric, dict):
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "rubric",
+                "severity": "medium",
+                "message": "rubric is not a dict",
+                "suggested_action": "Run rubric_designer to produce three-dim rubric",
+            })
+        else:
+            for dim in ("qual", "eff", "gov"):
+                items = rubric.get(dim)
+                if items is None:
+                    continue  # optional per-dim
+                if not isinstance(items, list):
+                    issues.append({
+                        "issue_type": "invalid_value",
+                        "field": f"rubric.{dim}",
+                        "severity": "low",
+                        "message": f"rubric.{dim} is not a list",
+                        "suggested_action": f"Re-run rubric_designer for {dim} dimension",
+                    })
+
+    # 12. actual_sla_by_dim — three-dim breakdown
+    actual_sla_by_dim = summary.get("actual_sla_by_dim")
+    if actual_sla_by_dim is not None:
+        if not isinstance(actual_sla_by_dim, dict):
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "actual_sla_by_dim",
+                "severity": "low",
+                "message": "actual_sla_by_dim is not a dict",
+                "suggested_action": "Recompute actual SLA via compute_actual_sla",
+            })
+
+    # 13. fatal_error_rate — 硬约束: must be 0 (§3.4.4/§3.5.2)
+    fatal_error_rate = summary.get("fatal_error_rate")
+    if fatal_error_rate is not None and isinstance(fatal_error_rate, (int, float)):
+        if fatal_error_rate > 0:
+            issues.append({
+                "issue_type": "fatal_violation",
+                "field": "fatal_error_rate",
+                "severity": "critical",
+                "message": f"fatal_error_rate={fatal_error_rate} > 0; 硬约束违反，任何致命错误强制 nogo",
+                "suggested_action": "Eliminate fatal errors before proceeding; HITL mandatory review",
+            })
+
+    # 14. general_error_rate ≤ e_crit_max(R)
+    general_error_rate = summary.get("general_error_rate")
+    if (
+        general_error_rate is not None
+        and isinstance(general_error_rate, (int, float))
+        and isinstance(risk_level, str)
+    ):
+        e_crit_max = E_CRIT_MAX_BY_RISK.get(risk_level)
+        if e_crit_max is not None and general_error_rate > e_crit_max:
+            issues.append({
+                "issue_type": "general_error_exceeded",
+                "field": "general_error_rate",
+                "severity": "high",
+                "message": f"general_error_rate={general_error_rate} > e_crit_max({risk_level})={e_crit_max}",
+                "suggested_action": "Reduce general errors or escalate HITL review",
+            })
+
+    # 15. audit_completeness ≥ A_audit_min(R)
+    audit_completeness = summary.get("audit_completeness")
+    if (
+        audit_completeness is not None
+        and isinstance(audit_completeness, (int, float))
+        and isinstance(risk_level, str)
+    ):
+        a_audit_min = A_AUDIT_MIN_BY_RISK.get(risk_level)
+        if a_audit_min is not None and audit_completeness < a_audit_min:
+            issues.append({
+                "issue_type": "audit_completeness_below_floor",
+                "field": "audit_completeness",
+                "severity": "high",
+                "message": f"audit_completeness={audit_completeness} < A_audit_min({risk_level})={a_audit_min}",
+                "suggested_action": "Fill missing audit fields to meet completeness floor",
+            })
+
+    # 16. gap_grade — five-tier vocabulary + L3 escalation
+    gap_grade = summary.get("gap_grade")
+    if gap_grade is not None:
+        if gap_grade not in _VALID_GAP_GRADES:
+            issues.append({
+                "issue_type": "invalid_enum",
+                "field": "gap_grade",
+                "severity": "medium",
+                "message": f"gap_grade must be one of {_VALID_GAP_GRADES}, got {gap_grade!r}",
+                "suggested_action": "Set gap_grade from grade_gap output",
+            })
+        elif risk_level == "L3" and gap_grade in (GAP_GRADE_SIGNIFICANT, GAP_GRADE_LARGE, GAP_GRADE_SEVERE):
+            # L3 + gap_grade ≥ 显著差 → sla_gap_l3 escalation (§3.4.4)
+            issues.append({
+                "issue_type": "sla_gap_l3",
+                "field": "gap_grade",
+                "severity": "high",
+                "message": f"L3 gap_grade={gap_grade} triggers sla_gap_l3 escalation to hard constraint",
+                "suggested_action": "HITL review required — L3 scenarios with significant+ gap need domain expert sign-off",
+            })
 
     return issues
 
