@@ -31,6 +31,8 @@ _WHITELISTED_PATCH_FIELDS = frozenset({
     "hitl_rules", "hitl_level", "audit_requirements",
     "prohibited_conditions", "fatal_errors", "to_confirm",
     "risk_confidence",
+    "alternative_channel", "approval_subject",
+    "sts_diagnosis", "org_loops",
     "implementation_tax", "target_sla", "stability",
     "sample_size", "low_score_samples", "actual_sla", "gap_to_target_pct",
     "bundle_status", "report_status", "decision_card", "export_ready",

@@ -50,6 +50,10 @@ _WHITELISTED_PATCH_FIELDS = frozenset({
     "hitl_rules", "hitl_level", "audit_requirements",
     "prohibited_conditions", "fatal_errors", "to_confirm",
     "risk_confidence",  # Phase 4: confidence_mismatch auto-repair
+    # §3.2.2 PIPL §24 替代渠道 + §3.2.3 NFRA §16 批准主体
+    "alternative_channel", "approval_subject",
+    # §3.2 步骤1 STS 六变量诊断 + 步骤2 KOITL 组织循环归属
+    "sts_diagnosis", "org_loops",
     # Stage 1 F2/F3 derived artifacts — allow auto-refine to repair the
     # newly-derived coverage gaps (re-bind cross_system_links, re-derive
     # error_amplification_paths) without touching the frozen risk/HITL enums.
@@ -72,6 +76,13 @@ _WHITELISTED_PATCH_FIELDS = frozenset({
 # Modifications go through ``CapabilityMutabilityContract`` gates (sample
 # size + min improvement) and are written to settings.draft, never to
 # published settings.
+# P2: governance fields always require explicit human review. Suggestions
+# that patch these fields carry ``requires_human_review=True`` so downstream
+# consumers (UI / audit trail) can surface them distinctly.
+_GOVERNANCE_PATCH_FIELDS = frozenset({
+    "alternative_channel", "approval_subject", "sts_diagnosis", "org_loops",
+})
+
 CAPABILITY_WHITELIST = frozenset({
     "prompt.body",          # 修改 PromptTemplate.body
     "prompt.version",       # bump prompt.version v1→v2
@@ -597,12 +608,20 @@ def _build_stage_specific_recommendation(stage_name: str, stage_id: str, stage_r
         structured_issues = []
         for issue in validation_issues:
             severity = issue.get("severity", "medium")
+            suggested_patch = _build_suggested_patch(issue, scenario_summary)
+            # P2: governance field patches always require human review.
+            if suggested_patch is not None:
+                patch_fields = [suggested_patch.get("field", "")]
+                if suggested_patch.get("op") == "multi":
+                    patch_fields = [p.get("field", "") for p in suggested_patch.get("patches", [])]
+                if any(f in _GOVERNANCE_PATCH_FIELDS for f in patch_fields):
+                    suggested_patch["requires_human_review"] = True
             structured_issues.append({
                 "issue_type": issue.get("issue_type", "unknown"),
                 "affected_field": issue.get("field", ""),
                 "severity": severity,
                 "suggested_action": issue.get("suggested_action", ""),
-                "suggested_patch": _build_suggested_patch(issue, scenario_summary),
+                "suggested_patch": suggested_patch,
             })
 
         # Quality threshold checks

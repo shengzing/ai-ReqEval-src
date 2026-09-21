@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import { AlertTriangle, CheckCircle2, FileCheck2, GitBranch, MessageSquareWarning, ShieldCheck, XCircle } from 'lucide-react'
 
 import type { EvidenceItem, Stage } from '@/lib/types'
-import { asArray, asRecord, getFirst, BoundaryReviewStatusBadge, CardGridPanel, CrossSystemLinksPanel, ErrorAmplificationPathsPanel, ObjectListPanel, PanelTitle, RawPayloadPanel, RiskGovernanceMatrixPanel, TagPanel } from './result-renderers'
+import { asArray, asRecord, getFirst, AuditRequirementsGrid, BoundaryReviewStatusBadge, CardGridPanel, CrossSystemLinksPanel, ErrorAmplificationPathsPanel, HarnessStepsTimeline, ObjectListPanel, OrgLoopsPanel, PanelTitle, ProjectLevelArtifactsPanel, RawPayloadPanel, RiskGovernanceMatrixPanel, StsDiagnosisPanel, TagPanel } from './result-renderers'
 import { SAPWorkflowPanel } from './sap-workflow-panel'
 
 /** Render a field badge: "missing" for absent, error badge for invalid enums. */
@@ -231,6 +231,14 @@ export function StageOneScenarioPanel({ stage, evidenceItems }: { stage: Stage; 
   // ── 11. Audit requirements ───────────────────────────────────────────
   const auditRequirements = asArray(scenarioSummary.audit_requirements)
 
+  // ── 11a. §3.2.2 PIPL §24 alternative channel + §3.2.3 NFRA §16 approval subject ──
+  const alternativeChannel = String(scenarioSummary.alternative_channel ?? '').trim()
+  const approvalSubject    = String(scenarioSummary.approval_subject ?? '').trim()
+
+  // ── 11b. §3.2 步骤1 STS 六变量 + 步骤2 KOITL 组织循环归属 ──
+  const stsDiagnosis = scenarioSummary.sts_diagnosis
+  const orgLoops = asArray(scenarioSummary.org_loops)
+
   // ── 12. Evidence refs ───────────────────────────────────────────────
   const evidenceRefs = asArray(scenarioSummary.evidence_refs)
 
@@ -342,8 +350,47 @@ export function StageOneScenarioPanel({ stage, evidenceItems }: { stage: Stage; 
         {/* 10. Fatal errors */}
         <ObjectListPanel title="致命错误" items={fatalErrors} helpText="列出一旦发生就应立即停止、升级或人工接管的错误类型。" />
 
-        {/* 11. Audit requirements */}
-        <TagPanel title="审计要求" items={auditRequirements} helpText="说明需要留痕、可追溯和可审计的证据要求，服务于后续报告和复核。" />
+        {/* 11. Audit requirements — 8 字段 schema（§3.2.4：基础 4 + 扩展 4；AML +1） */}
+        <AuditRequirementsGrid items={auditRequirements} boundaryFlag={scenarioSummary.boundary_flag === true} />
+
+        {/* 11a. §3.2.2 PIPL §24 替代渠道 + §3.2.3 NFRA §16 批准主体 */}
+        <div className="grid gap-2 md:grid-cols-2">
+          <div className="rounded-md border border-border p-3">
+            <PanelTitle
+              title="替代渠道（PIPL §24）"
+              helpText={hitlLevel === 'mandatory'
+                ? 'mandatory HITL 场景必填：列出不依赖算法的替代决策渠道（人工流程降级 / 纯人工复核 / 人工+规则引擎）。'
+                : '当前 HITL 不是 mandatory，此字段为非必填；若业务侧另有要求可填写。'}
+            />
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <span className={`rounded-md px-2 py-1 font-medium ${alternativeChannel ? 'bg-emerald-500/15 text-emerald-700' : 'bg-amber-500/15 text-amber-700'}`}>
+                {alternativeChannel ? '已配置' : hitlLevel === 'mandatory' ? '缺失（必填）' : '未配置'}
+              </span>
+              <span className="font-mono text-[11px] text-muted-foreground">{alternativeChannel || '—'}</span>
+            </div>
+          </div>
+          <div className="rounded-md border border-border p-3">
+            <PanelTitle
+              title="批准主体（NFRA 第十六条）"
+              helpText={riskLevel === 'L3'
+                ? 'L3 风险场景必填：列出准入门控的责任主体（风险管理委员会 / 合规委员会 / 科技委员会），L3 必须为风险管理委员会。'
+                : '当前风险等级非 L3，此字段为非必填。'}
+            />
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <span className={`rounded-md px-2 py-1 font-medium ${approvalSubject ? 'bg-emerald-500/15 text-emerald-700' : 'bg-amber-500/15 text-amber-700'}`}>
+                {approvalSubject ? '已配置' : riskLevel === 'L3' ? '缺失（必填）' : '未配置'}
+              </span>
+              <span className="font-mono text-[11px] text-muted-foreground">{approvalSubject || '—'}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* 11c. §3.2 步骤 1→2→3 四元组执行轨迹 */}
+        <HarnessStepsTimeline plan={harnessPlan} traces={harnessTraces} scenarioSummary={scenarioSummary} validation={validation} lockCheck={stage.lockCheck} />
+
+        {/* 11b. §3.2 步骤1 STS 六变量诊断 + 步骤2 KOITL 组织循环归属 */}
+        <StsDiagnosisPanel diagnosis={stsDiagnosis} />
+        <OrgLoopsPanel loops={orgLoops} />
 
         {/* 12. Evidence refs */}
         <div className="rounded-md border border-border p-3">
@@ -361,6 +408,9 @@ export function StageOneScenarioPanel({ stage, evidenceItems }: { stage: Stage; 
           <ValidationIssuesPanel issues={validationIssues} />
           <QualityScoresPanel quality={quality} />
         </div>
+
+        {/* §3.6 / F1：课题级产物入口（主案例/补充场景/材料清单） */}
+        <ProjectLevelArtifactsPanel payload={asRecord(payload.project_level_artifacts)} />
 
         {/* Raw payload */}
         <RawPayloadPanel payload={payload} />

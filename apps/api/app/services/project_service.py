@@ -699,6 +699,51 @@ def build_stage_lock_checks(stage_id: str) -> dict[str, object]:
                 object_id=stage_result.id,
             ))
 
+        # Gap P0 #4: PIPL §24 替代渠道 + NFRA §16 批准主体 — 论文要求"缺失则
+        # locked=False"，但此前只有 contract 校验有 message，锁定门禁没执行。
+        alt_channel = scenario_summary.get("alternative_channel") or ""
+        if hitl_level == "mandatory":
+            checks.append(_lock_check(
+                "s1_mandatory_alternative_channel",
+                "mandatory HITL 必须配置替代渠道（PIPL §24）",
+                passed=bool(alt_channel.strip()),
+                code="S1_PIPL_ALTERNATIVE_CHANNEL_MISSING",
+                hint="scenario_summary.alternative_channel 为空；补 manual_fallback / full_manual / manual_plus_rules。",
+                object_id=stage_result.id,
+            ))
+        if risk_level == "L3":
+            approval_subject = (scenario_summary.get("approval_subject") or "").strip()
+            checks.append(_lock_check(
+                "s1_l3_approval_subject",
+                "L3 风险等级必须由风管委批准（NFRA 第十六条）",
+                passed=bool(approval_subject) and approval_subject == "risk_committee",
+                code="S1_NFRA_APPROVAL_SUBJECT_NOT_RISK_COMMITTEE",
+                hint="L3 场景批准主体必须为 risk_committee；当前={!r}。".format(approval_subject),
+                object_id=stage_result.id,
+            ))
+            # P2: 论文 §3.2 步骤2 判据 — L3 场景任一组织循环缺位则 locked=False。
+            org_loops_raw = scenario_summary.get("org_loops")
+            if isinstance(org_loops_raw, list):
+                seen_types = {
+                    (loop.get("loop_type") or loop.get("kind"))
+                    for loop in org_loops_raw
+                    if isinstance(loop, dict)
+                }
+            else:
+                seen_types = set()
+            required_loop_types = {"UA-Tasks", "CA-Tasks", "O-Tasks", "C-Tasks"}
+            missing_loop_types = required_loop_types - seen_types
+            checks.append(_lock_check(
+                "s1_l3_org_loops_completeness",
+                "L3 场景四类 KOITL 组织循环须全部在场（论文 §3.2 步骤2）",
+                passed=not missing_loop_types,
+                code="S1_KOITL_LOOP_TYPE_MISSING",
+                hint="L3 缺失循环类型：{}。须 UA-Tasks（风险+合规双签）+ CA-Tasks（规则维护）+ O-Tasks（业务负责人 mandatory 签字）+ C-Tasks（季度再评估）。".format(
+                    sorted(missing_loop_types) if missing_loop_types else "无"
+                ),
+                object_id=stage_result.id,
+            ))
+
         # 10. Quality score thresholds are lock gates, not display advice.
         quality_thresholds = {
             "completeness_score": (0.70, "完整性 ≥ 0.70"),

@@ -6,7 +6,9 @@ import { CircleHelp } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import type { StageLockCheck } from '@/lib/types'
 import {
+  asArray,
   asRecord,
   formatValue,
   getFirst,
@@ -51,6 +53,438 @@ export function Metric({ label, value, className, helpText }: { label: string; v
     </div>
   )
 }
+
+
+// ── Stage 1 审计留痕 8 字段 schema（§3.2.4 / NFRA 第二十一条+第二十二条+金规〔2024〕24号第五十条） ──
+export const AUDIT_FIELD_SCHEMA = [
+  { id: 'input_material_version', label: '输入材料版本', base: true,  group: 'base',     help: '材料版本号 + 解析时间戳' },
+  { id: 'raw_analysis_output',    label: '原始分析结果', base: true,  group: 'base',     help: 'AI 原始 JSON / 文本输出快照' },
+  { id: 'reviewer_opinion',       label: '复核人意见',   base: true,  group: 'base',     help: '复核人签字 + 复核结论' },
+  { id: 'timestamp',              label: '时间戳',       base: true,  group: 'base',     help: 'UTC+本地时区，覆盖各阶段节点' },
+  { id: 'inference_path',         label: '推理路径',     base: false, group: 'extended', help: '输入→中间推理→输出的完整链路与引用来源（NFRA 第二十二条）' },
+  { id: 'threshold_trigger_log',  label: '阈值触发记录', base: false, group: 'extended', help: '风险等级/客户处置/监管敏感阈值的命中记录（NFRA 第二十二条）' },
+  { id: 'ai_disclosure',          label: 'AI 生成内容显著标识', base: false, group: 'extended', help: '显式水印 / 隐式元数据 / 不标识（NFRA 第二十一条 + 深度合成规定第十七条）' },
+  { id: 'log_retention',          label: '日志保存期限', base: false, group: 'extended', help: '业务生命周期 / 5 年 / 10 年（NFRA 第二十一条 ≥业务存续期）' },
+] as const
+export type AuditFieldId = typeof AUDIT_FIELD_SCHEMA[number]['id']
+export const AML_EXTRA_AUDIT_FIELDS = [
+  { id: 'regulatory_reporting_log', label: '监管报送流水', help: 'AML 场景特有，监管报送批次号+回执' },
+] as const
+
+// 关键词归一：把 audit_requirements 中的自由文本项映射到 8 字段
+const AUDIT_KEYWORD_RULES: Array<{ id: AuditFieldId; patterns: RegExp[] }> = [
+  { id: 'input_material_version',  patterns: [/输入材料版本/, /原始纪要/, /材料版本/, /版本号/, /input.{0,3}version/i] },
+  { id: 'raw_analysis_output',     patterns: [/原始分析结果/, /原始输出/, /AI.{0,3}输出/, /生成快照/, /raw.{0,3}output/i] },
+  { id: 'reviewer_opinion',        patterns: [/复核人意见/, /复核意见/, /复核结论/, /签字/, /reviewer/i] },
+  { id: 'timestamp',               patterns: [/时间戳/, /timestamp/i, /UTC/, /本地时区/] },
+  { id: 'inference_path',          patterns: [/推理路径/, /推理链路/, /inference.{0,3}path/i, /引用来源/] },
+  { id: 'threshold_trigger_log',   patterns: [/阈值触发/, /阈值命中/, /trigger.{0,3}log/i] },
+  { id: 'ai_disclosure',           patterns: [/显著标识/, /AIGC\s*标识/, /水印/, /显式标识/, /隐式元数据/, /ai.{0,3}disclosure/i, /deepfake/i] },
+  { id: 'log_retention',           patterns: [/日志保存/, /保存期限/, /存续期/, /\d+\s*年/, /log.{0,3}retention/i, /business.{0,3}lifetime/i] },
+]
+
+function matchAuditField(fieldId: AuditFieldId, items: string[]): string[] {
+  const rule = AUDIT_KEYWORD_RULES.find((r) => r.id === fieldId)
+  if (!rule) return []
+  return items.filter((raw) => rule.patterns.some((re) => re.test(raw)))
+}
+
+/** 判断 AML 场景是否触发（监管报送相关关键词或 boundary_flag=true） */
+function isAmlScenario(items: string[], boundaryFlag?: boolean): boolean {
+  if (boundaryFlag === true) return true
+  const joined = items.join(' ')
+  return /反洗钱|AML|监管报送|报送流水|可疑交易|大额/.test(joined)
+}
+
+/** 8 字段 schema 网格：覆盖度 + 已命中条目预览；可叠加 AML 第 9 字段。 */
+export function AuditRequirementsGrid({
+  items,
+  boundaryFlag,
+  title = '审计留痕字段（§3.2.4 八字段 schema）',
+  helpText,
+}: {
+  items: unknown[]
+  boundaryFlag?: boolean
+  title?: string
+  helpText?: ReactNode
+}) {
+  // P2: structured items ({field_id, label, configured, value}) map directly;
+  // legacy string items fall back to keyword matching.
+  const structured = asArray(items).map((v) => asRecord(v)).filter((rec): rec is Record<string, unknown> => Boolean(rec && rec.field_id))
+  const structuredIds = new Set(structured.map((rec) => String(rec.field_id)))
+  const raw = asArray(items).filter((v) => typeof v === 'string').map((v) => String(v))
+  const baseFields = AUDIT_FIELD_SCHEMA.filter((f) => f.group === 'base')
+  const extFields  = AUDIT_FIELD_SCHEMA.filter((f) => f.group === 'extended')
+  const showAml = isAmlScenario([...raw, ...structured.map((r) => String(r.label ?? ''))], boundaryFlag) || structuredIds.has('regulatory_reporting_log')
+  const coveredCount =
+    AUDIT_FIELD_SCHEMA.filter((f) => structuredIds.has(f.id) || matchAuditField(f.id, raw).length > 0).length
+    + (showAml && (structuredIds.has('regulatory_reporting_log') || /监管报送|报送流水|反洗钱|AML/.test(raw.join(' '))) ? 1 : 0)
+  const totalCount = AUDIT_FIELD_SCHEMA.length + (showAml ? 1 : 0)
+
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle
+        title={title}
+        helpText={helpText ?? '依据 §3.2.4：基础 4 字段（输入版本/原始输出/复核意见/时间戳）+ 扩展 4 字段（推理路径/阈值触发记录/AIGC 标识/日志保存期），AML 场景再加 1 字段（监管报送流水）。'}
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className={`rounded-md px-2 py-1 font-medium ${coveredCount === totalCount ? 'bg-emerald-500/15 text-emerald-700' : 'bg-amber-500/15 text-amber-700'}`}>
+          {coveredCount} / {totalCount} 字段已留痕
+        </span>
+        {raw.length === 0 && (
+          <span className="text-muted-foreground">当前 audit_requirements 为空，关键词归一匹配不到任何字段。</span>
+        )}
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {[...baseFields, ...extFields].map((field) => {
+          const structHit = structured.find((rec) => String(rec.field_id) === field.id && rec.configured === true)
+          const structValue = structHit ? String(structHit.value ?? '') : ''
+          const hits: string[] = structHit
+            ? [structValue || String(structHit.label ?? '') || field.label]
+            : matchAuditField(field.id, raw)
+          const covered = hits.length > 0
+          return (
+            <div
+              key={field.id}
+              className={`rounded-md border p-2 ${covered ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-dashed border-muted-foreground/40 bg-muted/20'}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-medium text-foreground">{field.label}</p>
+                {covered
+                  ? <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">已覆盖</span>
+                  : <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">缺失</span>}
+              </div>
+              <p className="mt-0.5 text-[10px] leading-4 text-muted-foreground">{field.help}</p>
+              {covered && (
+                <ul className="mt-1 space-y-0.5">
+                  {hits.slice(0, 2).map((h, i) => (
+                    <li key={`hit-${i}`} className="truncate text-[10px] text-emerald-700">✓ {h}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )
+        })}
+        {showAml && AML_EXTRA_AUDIT_FIELDS.map((field) => {
+          const covered = structuredIds.has(field.id) || /监管报送|报送流水|反洗钱|AML/.test(raw.join(' '))
+          return (
+            <div
+              key={field.id}
+              className={`rounded-md border p-2 ${covered ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-dashed border-muted-foreground/40 bg-muted/20'}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-medium text-foreground">{field.label}</p>
+                {covered
+                  ? <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">已覆盖</span>
+                  : <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">缺失</span>}
+              </div>
+              <p className="mt-0.5 text-[10px] leading-4 text-muted-foreground">{field.help}</p>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── §3.2 步骤1 STS 六变量社会子系统诊断（§1.3.1 STS 理论） ──────────────
+export const STS_6_VARIABLES = [
+  { id: 'autonomy',           label: '自律性 (Autonomy)' },
+  { id: 'responsibility',     label: '责任 (Responsibility)' },
+  { id: 'task_integrity',     label: '任务整体性 (Task Integrity)' },
+  { id: 'diversity',          label: '多样性 (Diversity)' },
+  { id: 'social_support',     label: '社会支持 (Social Support)' },
+  { id: 'boundary_spanning',  label: '边界跨越 (Boundary Spanning)' },
+] as const
+const STS_STATUS_META: Record<string, { label: string; cls: string }> = {
+  aligned:    { label: '已对齐', cls: 'bg-emerald-500/15 text-emerald-700' },
+  tension:    { label: '需协调', cls: 'bg-amber-500/15 text-amber-700' },
+  misaligned: { label: '失配',   cls: 'bg-destructive/15 text-destructive' },
+  unmapped:   { label: '未识别', cls: 'bg-muted text-muted-foreground' },
+}
+/** 渲染 §3.2 步骤1 STS 六变量社会子系统诊断面板。 */
+export function StsDiagnosisPanel({ diagnosis }: { diagnosis: unknown }) {
+  const obj = asRecord(diagnosis)
+  const hasAny = obj && Object.keys(obj).length > 0
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle
+        title="STS 六变量诊断（§3.2 步骤1 / §1.3.1 社会子系统诊断）"
+        helpText="按 STS 理论六变量给出社会侧诊断（aligned / tension / misaligned / unmapped），与 ISO 可能性×后果矩阵（技术侧分级）共同构成「分级依据 + 映射依据」双层。"
+      />
+      {!hasAny ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">未提供 STS 诊断（论文 §3.2 步骤1 推荐补全）。</p>
+      ) : (
+        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {STS_6_VARIABLES.map((v) => {
+            const status = String(obj[v.id] ?? 'unmapped')
+            const meta = STS_STATUS_META[status] ?? STS_STATUS_META.unmapped
+            return (
+              <div key={v.id} className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2">
+                <span className="text-[11px] text-foreground">{v.label}</span>
+                <span className={`rounded-md px-2 py-0.5 text-[10px] font-medium ${meta.cls}`}>{meta.label}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const ORG_LOOP_KIND_LABEL: Record<string, string> = {
+  'UA-Tasks': 'AI 使用循环',
+  'CA-Tasks': 'AI 定制循环',
+  'O-Tasks':  '原任务循环',
+  'C-Tasks':  '上下文变化循环',
+}
+/** 渲染 §3.2 步骤2 KOITL 组织循环归属面板。 */
+export function OrgLoopsPanel({ loops }: { loops: unknown[] }) {
+  const items = asArray(loops)
+    .map((it) => asRecord(it))
+    .filter((rec): rec is Record<string, unknown> => Boolean(rec))
+  if (!items.length) {
+    return (
+      <div className="rounded-md border border-dashed border-muted-foreground/40 bg-muted/30 p-3 text-xs text-muted-foreground">
+        <PanelTitle title="KOITL 组织循环归属（§3.2 步骤2 四字段之一）" helpText="阶段一联合设计映射要求同时设计 KOITL 组织循环归属（org_loops）。L2/L3 建议至少 1 条。" />
+        <p className="mt-2">当前未配置 org_loops。</p>
+      </div>
+    )
+  }
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle title="KOITL 组织循环归属（§3.2 步骤2）" helpText="组织在环（KOITL）的载体——记录哪些角色在哪些决策点形成闭环，配合 HITL 强度形成责任不可悬空的治理底线。" />
+      <ul className="mt-2 space-y-2">
+        {items.map((loop, i) => {
+          const loopType = String(loop.loop_type ?? loop.kind ?? '')
+          const kindLabel = (ORG_LOOP_KIND_LABEL[loopType] ?? loopType) || '循环'
+          const responsibleRole = String(loop.responsible_role ?? loop.role ?? '未指定角色')
+          const frequency = String(loop.frequency ?? '')
+          const mandatoryFlag = loop.mandatory_flag === true
+          return (
+            <li key={`loop-${i}`} className="rounded-md border border-border bg-muted/40 p-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">{kindLabel}</span>
+                <span className="text-sm font-medium text-foreground">{responsibleRole}</span>
+                <span className="font-mono text-[10px] text-muted-foreground">{String(loop.loop_id ?? '')}</span>
+                {frequency && (
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{frequency}</span>
+                )}
+                {mandatoryFlag && (
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">mandatory</span>
+                )}
+              </div>
+              {typeof loop.responsibility === 'string' && loop.responsibility && (
+                <p className="mt-1 text-[11px] text-muted-foreground">{loop.responsibility}</p>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+export function HarnessStepsTimeline({ plan, traces, scenarioSummary, validation, lockCheck }: {
+  plan: unknown[]
+  traces: unknown[]
+  scenarioSummary: Record<string, unknown>
+  validation?: Record<string, unknown>
+  lockCheck?: StageLockCheck
+}) {
+  // 从已有 scenario_summary + validation 合成 §3.2 步骤 1→2→3 四元组
+  const rl = String(scenarioSummary.risk_level ?? '')
+  const hl = String(scenarioSummary.hitl_level ?? '')
+  const sts = scenarioSummary.sts_diagnosis
+  const orgLoops = Array.isArray(scenarioSummary.org_loops) ? scenarioSummary.org_loops : []
+  const auditReq = Array.isArray(scenarioSummary.audit_requirements) ? scenarioSummary.audit_requirements : []
+  const procNodes = Array.isArray(scenarioSummary.process_nodes) ? scenarioSummary.process_nodes : []
+  const prohibited = Array.isArray(scenarioSummary.prohibited_conditions) ? scenarioSummary.prohibited_conditions : []
+  const fatalErrors = Array.isArray(scenarioSummary.fatal_errors) ? scenarioSummary.fatal_errors : []
+  const alternativeChannel = String(scenarioSummary.alternative_channel ?? '')
+  const approvalSubject = String(scenarioSummary.approval_subject ?? '')
+  const evRefs = Array.isArray(scenarioSummary.evidence_refs) ? scenarioSummary.evidence_refs : []
+  const highIssues = asArray(validation?.issues).filter((it: any) => (it as any)?.severity === 'high').length
+  const totalIssues = asArray(validation?.issues).length
+  // P2: consume backend /lock-check when available (authoritative gate);
+  // fall back to the local heuristic only when the caller has not wired
+  // the backend result yet (e.g. legacy payloads without lockCheck).
+  const backendLockable = lockCheck ? lockCheck.ready : undefined
+  const lockable = backendLockable ?? (rl === 'L3'
+    ? (hl === 'mandatory' || hl === 'strict') && approvalSubject && alternativeChannel && prohibited.length > 0 && fatalErrors.length > 0
+    : rl === 'L2'
+      ? prohibited.length >= 0
+      : true)
+
+  const step1Ok = rl && (sts ? Object.keys(sts as object).length >= 3 : true)
+  const step2Ok = hl && orgLoops.length > 0 && auditReq.length > 0
+  const step3Ok = totalIssues === 0 && lockable
+
+  const steps = [
+    {
+      id: 'step-1',
+      label: '步骤1 社会技术分级',
+      thesis: '§3.2 步骤1 — 联合优化：按 ISO 31000/23894 做风险等级判定 + 按 STS 六变量做社会子系统诊断',
+      input: { desc: '场景业务底稿 + 责任链 + 输入材料', refs: evRefs },
+      operation: `STS 六变量诊断（${sts ? Object.keys(sts as object).length : 0} / 6）+ 风险关键词扫描 → 判定 ${rl || '?'}`,
+      output: `risk_level = ${rl || '未判定'}`,
+      criterion: 'ISO 可能性×后果矩阵（论文 §3.2.1） + STS 六变量（§1.3.1）',
+      pass: !!step1Ok,
+    },
+    {
+      id: 'step-2',
+      label: '步骤2 联合设计映射',
+      thesis: '§3.2 步骤2 — HITL 强度 + 准入禁入 + 审计留痕 + KOITL 组织循环归属同时设计',
+      input: { desc: '步骤1 产出的 risk_level', refs: rl ? [`risk_level=${rl}`] : [] },
+      operation: `HITL=${hl || '?'} · 禁入 ${prohibited.length} 条 · 致命 ${fatalErrors.length} 条 · 审计 ${auditReq.length} 条 · 替代渠道 ${alternativeChannel || '—'} · 批准主体 ${approvalSubject || '—'} · KOITL ${orgLoops.length} 环`,
+      output: `hitl_level=${hl || '?'} · org_loops=${orgLoops.length} · alternative_channel=${alternativeChannel || '—'} · approval_subject=${approvalSubject || '—'}`,
+      criterion: 'L3→strict/mandatory 强制对齐 + L3 须风管委批准 + mandatory 须 PIPL §24 替代渠道',
+      pass: !!step2Ok,
+    },
+    {
+      id: 'step-3',
+      label: '步骤3 门控校验',
+      thesis: '§3.2 步骤3 — 强制对齐检查，论文规定 L3 + strict/mandatory + 致命错误已定义 + 审计字段完整 + 人工最终复核才可锁定',
+      input: { desc: '步骤2 四字段', refs: [hl, approvalSubject, alternativeChannel].filter(Boolean) as string[] },
+      operation: lockCheck
+        ? `后端 /lock-check — ${lockCheck.checks.filter((c) => c.passed).length} / ${lockCheck.checks.length} 门禁通过`
+        : `阶段一契约校验 — high ${highIssues} / total ${totalIssues}`,
+      output: lockable ? '可锁定（stage1_locked=True）' : '不可锁定（校验不通过）',
+      criterion: lockCheck
+        ? `后端权威门禁（${lockCheck.checks.length} 项）+ 5 维质量评分`
+        : '5 硬门控（risk_level / hitl_level / evidence_refs / L3 prohibited / L3 fatal）+ 5 维质量评分',
+      pass: step3Ok,
+    },
+  ]
+
+  const passedCount = steps.filter(s => s.pass).length
+  const overall = passedCount === steps.length
+
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle
+        title="阶段一执行轨迹（§3.2 步骤 1→2→3 输入/操作/产出/判据）"
+        helpText="从 scenario_summary + stage1_validation 合成的四元组时间线；真实执行时 harness.plan/traces 会以 LLM 输出为准。"
+      />
+      <div className="mt-2 flex items-center gap-2 text-xs">
+        <span className={`rounded-md px-2 py-1 font-medium ${overall ? 'bg-emerald-500/15 text-emerald-700' : 'bg-amber-500/15 text-amber-700'}`}>
+          {passedCount} / {steps.length} 步通过 · 阶段一 {overall ? '可锁定' : '待补正'}
+        </span>
+      </div>
+      <ol className="mt-3 space-y-3">
+        {steps.map((s, i) => (
+          <li key={s.id} className={`rounded-md border p-3 ${s.pass ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5'}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${s.pass ? 'bg-emerald-500/30 text-emerald-700' : 'bg-amber-500/30 text-amber-700'}`}>{i + 1}</span>
+              <span className="text-sm font-semibold text-foreground">{s.label}</span>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{s.thesis}</span>
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <div>
+                <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">输入 (Input)</p>
+                <p className="mt-0.5 text-[11px] text-foreground">{s.input.desc}</p>
+                {s.input.refs.length > 0 && (
+                  <p className="mt-0.5 text-[10px] text-muted-foreground">{s.input.refs.join(', ')}</p>
+                )}
+              </div>
+              <div>
+                <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">操作 (Operation)</p>
+                <p className="mt-0.5 text-[11px] text-foreground">{s.operation}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">产出 (Output)</p>
+                <p className="mt-0.5 text-[11px] text-foreground">{s.output}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">判据 (Criterion)</p>
+                <p className="mt-0.5 text-[11px] text-foreground">{s.criterion}</p>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
+/**
+ * §3.6 / F1：主案例 / 补充验证场景 / 材料清单 — 课题级产物（不在单项目内）。
+ * 这里仅提供入口与说明，不在单项目 evaluation scope 内编辑或锁定。
+ */
+export function ProjectLevelArtifactsPanel({ payload }: { payload?: Record<string, unknown> }) {
+  const artifacts = asRecord(payload)
+  const mainCase = asRecord(artifacts?.main_case)
+  const supplementary = asArray(artifacts?.supplementary_scenarios)
+  const materials = asArray(artifacts?.material_inventory)
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PanelTitle
+        title="课题级产物（§3.6 / F1 主案例 · 补充场景 · 材料清单）"
+        helpText="以下三项为课题研究级产物，不在单项目 evaluation scope 内编辑或锁定——它们是单项目 scenario_summary 的上游输入，在研究侧维护。"
+      />
+      <div className="mt-2 grid gap-2 md:grid-cols-3">
+        <div className="rounded-md border border-border bg-muted/30 p-3">
+          <p className="text-sm font-semibold text-foreground">主案例</p>
+          {mainCase ? (
+            <>
+              <p className="mt-1 text-[11px] text-foreground">{String(mainCase.name ?? '')}</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">{String(mainCase.description ?? '')}</p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {mainCase.risk_level ? <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">{String(mainCase.risk_level)}</span> : null}
+                {mainCase.hitl_level ? <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">{String(mainCase.hitl_level)}</span> : null}
+              </div>
+              {Array.isArray(mainCase.core_roles) && mainCase.core_roles.length > 0 && (
+                <p className="mt-1 text-[10px] text-muted-foreground">角色：{mainCase.core_roles.join(' / ')}</p>
+              )}
+            </>
+          ) : (
+            <p className="mt-1 text-[11px] text-muted-foreground">课题核心代表性案例（贷后风险监测），研究侧草稿。</p>
+          )}
+        </div>
+        <div className="rounded-md border border-border bg-muted/30 p-3">
+          <p className="text-sm font-semibold text-foreground">补充验证场景</p>
+          {supplementary.length > 0 ? (
+            <ul className="mt-1 space-y-1">
+              {supplementary.map((it, i) => {
+                const rec = asRecord(it)
+                if (!rec) return null
+                return (
+                  <li key={`sup-${i}`} className="text-[11px]">
+                    <span className="font-medium text-foreground">{String(rec.name ?? '')}</span>
+                    <span className="ml-1 text-muted-foreground">({String(rec.similarity ?? '')})</span>
+                    <p className="text-[10px] text-muted-foreground">{String(rec.purpose ?? '')}</p>
+                  </li>
+                )
+              })}
+            </ul>
+          ) : (
+            <p className="mt-1 text-[11px] text-muted-foreground">2-3 个相近场景用于迁移验证（授信准入 / 反欺诈 / 客户画像）。</p>
+          )}
+        </div>
+        <div className="rounded-md border border-border bg-muted/30 p-3">
+          <p className="text-sm font-semibold text-foreground">材料清单</p>
+          {materials.length > 0 ? (
+            <ul className="mt-1 space-y-1">
+              {materials.map((it, i) => {
+                const rec = asRecord(it)
+                if (!rec) return null
+                return (
+                  <li key={`mat-${i}`} className="text-[11px] text-muted-foreground">
+                    <span className="font-medium text-foreground">{String(rec.name ?? '')}</span>
+                    <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px]">{String(rec.type ?? '')}</span>
+                  </li>
+                )
+              })}
+            </ul>
+          ) : (
+            <p className="mt-1 text-[11px] text-muted-foreground">全课题共享输入材料目录（法规 / 标准 / SOP 模板）。</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 export function TagPanel({ title, items, helpText }: { title: string; items: unknown[]; helpText?: ReactNode }) {
   if (!items.length) return null

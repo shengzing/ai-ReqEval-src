@@ -457,6 +457,37 @@ def _build_risk_grading(
     # P1-1: propagate risk_confidence from risk_identify output (additive overlay)
     risk_confidence = risk.get("risk_confidence")
 
+    # Gap P0 #1: propagate governance fields emitted by risk_identify_tool.
+    # Normalize the enum-valued fields via the contract helpers so values
+    # arriving as Chinese aliases / blank strings / wrong types all collapse
+    # to a single canonical form (or None). Empty values stay None — the
+    # contract's missing_field rules are what surface them to humans, not
+    # silent auto-fills here.
+    from src.apps.api.app.services.stage1_contract import (
+        normalize_alternative_channel,
+        normalize_approval_subject,
+    )
+    alt_channel_raw = risk.get("alternative_channel")
+    try:
+        alt_channel = normalize_alternative_channel(alt_channel_raw)
+    except (ValueError, TypeError):
+        alt_channel = None
+
+    approval_subject_raw = risk.get("approval_subject")
+    try:
+        approval_subject = normalize_approval_subject(approval_subject_raw)
+    except (ValueError, TypeError):
+        approval_subject = None
+
+    # sts_diagnosis / org_loops are structured payloads — pass through as-is
+    # so the contract can validate the schema. We only guard against
+    # accidental non-dict / non-list shapes that would crash downstream.
+    sts_diagnosis_raw = risk.get("sts_diagnosis")
+    sts_diagnosis = sts_diagnosis_raw if isinstance(sts_diagnosis_raw, dict) else {}
+
+    org_loops_raw = risk.get("org_loops")
+    org_loops = org_loops_raw if isinstance(org_loops_raw, list) else []
+
     phase_b: dict = {
         "boundary": boundary,
         "risk_items": risk_items,
@@ -475,6 +506,16 @@ def _build_risk_grading(
     }
     if risk_confidence is not None and isinstance(risk_confidence, dict):
         phase_b["risk_confidence"] = risk_confidence
+
+    # Gap P0 #1: governance fields propagate regardless of presence —
+    # empty dict / empty list / None is what the contract expects when the
+    # upstream tool had nothing to emit. Tools that do emit values (current
+    # ``risk_identify_tool`` puts unmapped STS + 3-line KOITL defaults) see
+    # their values flow through unchanged after normalization.
+    phase_b["alternative_channel"] = alt_channel or ""
+    phase_b["approval_subject"] = approval_subject or ""
+    phase_b["sts_diagnosis"] = sts_diagnosis
+    phase_b["org_loops"] = org_loops
     return phase_b
 
 
@@ -640,6 +681,60 @@ def _build_error_amplification_paths(summary: dict) -> list[dict]:
             "terminal_reached": has_terminal,
         })
     return paths
+
+
+def _build_project_level_artifacts(scenario_summary: dict) -> dict:
+    """P2: 课题级产物（§3.6 / F1）— 主案例 / 补充验证场景 / 材料清单。
+
+    论文规定这三项是课题研究级产物，不在单项目 evaluation scope 内编辑或
+    锁定；它们是 scenario_summary 的上游输入。此处按论文 §4.1 主案例
+    （贷后风险监测）+ §1.6.1 补充场景（授信准入/反欺诈/客户画像）+ §2.2.4
+    法规对标表生成种子数据，附在 stage-1 result_payload 供前端可见。
+    """
+    scenario_name = str(scenario_summary.get("scenario_name", ""))
+    return {
+        "main_case": {
+            "case_id": "loan-risk-monitoring",
+            "name": scenario_name or "贷后风险监测摘要生成",
+            "description": "课题核心代表性案例：贷后风险监测与预警研判，覆盖收集检查记录、核验异常、识别预警、草拟摘要、风险经理复核全链路。",
+            "business_process": "贷后检查、预警研判",
+            "risk_level": str(scenario_summary.get("risk_level", "")),
+            "hitl_level": str(scenario_summary.get("hitl_level", "")),
+            "core_roles": ["客户经理", "风险经理", "合规复核人员"],
+            "reference": "论文 §4.1 主案例",
+        },
+        "supplementary_scenarios": [
+            {
+                "scenario_id": "credit-admission",
+                "name": "授信准入辅助",
+                "similarity": "high",
+                "purpose": "验证风险分级矩阵在同属信贷审批链路的迁移稳健性",
+                "sample_size": "15-25 条脱敏样本",
+            },
+            {
+                "scenario_id": "card-antifraud",
+                "name": "信用卡反欺诈甄别",
+                "similarity": "medium",
+                "purpose": "验证禁入红线与 KOITL 组织循环在合规驱动型场景的适用性",
+                "sample_size": "15-25 条脱敏样本",
+            },
+            {
+                "scenario_id": "customer-profile",
+                "name": "客户画像标签生成",
+                "similarity": "medium",
+                "purpose": "验证 STS 六变量诊断在对客内容生成场景的社会子系统判别",
+                "sample_size": "15-25 条脱敏样本",
+            },
+        ],
+        "material_inventory": [
+            {"material_id": "nfra-2026-8", "name": "NFRA 金发〔2026〕8 号", "type": "regulation", "version": "2026", "reference": "§2.2.4 法规对标表"},
+            {"material_id": "pipl-24", "name": "PIPL 第二十四条", "type": "regulation", "version": "现行", "reference": "§2.2.4 法规对标表"},
+            {"material_id": "nfra-2024-24", "name": "金规〔2024〕24 号", "type": "regulation", "version": "2024", "reference": "§2.2.4 法规对标表"},
+            {"material_id": "eu-ai-act", "name": "EU AI Act (Regulation 2024/1689)", "type": "regulation", "version": "2024", "reference": "§2.2.4 国际同构"},
+            {"material_id": "iso-23894", "name": "ISO/IEC 23894:2023 AI 风险管理", "type": "standard", "version": "2023", "reference": "§2.2.4 管理体系"},
+            {"material_id": "loan-sop", "name": "贷后风险监测 SOP 模板", "type": "sop", "version": "业务侧待确认", "reference": "§4.1 主案例"},
+        ],
+    }
 
 
 def _emit_stage1_phase_events(
@@ -1139,6 +1234,8 @@ def _selective_merge_stage_one_llm_candidate(
         # F2/F3 derived list artifacts — adopt LLM candidate's substantive
         # version when better than the deterministic fallback.
         "cross_system_links", "error_amplification_paths",
+        # Gap P0 #2: §3.2 步骤2 KOITL 组织循环归属
+        "org_loops",
     )
 
     for field in _LIST_FIELDS:
@@ -1177,6 +1274,8 @@ def _selective_merge_stage_one_llm_candidate(
         "scenario_name", "boundary", "risk_confidence",
         "boundary_flag", "error_amplification_path",
         "boundary_review_status",
+        # Gap P0 #2: §3.2.2 / §3.2.3 / 步骤1 STS 六变量诊断
+        "alternative_channel", "approval_subject", "sts_diagnosis",
     )
 
     for field in _SCALAR_FIELDS:
@@ -2308,6 +2407,11 @@ def invoke_skill(*, skill_name: str, project_id: str, stage_id: str, run_id: Opt
             "issues": llm_synthesis_issues,
         }
         current_result.result_payload["scenario_summary"] = scenario_summary
+        # P2 §3.6 / F1: 课题级产物（主案例/补充场景/材料清单）附在
+        # result_payload，供前端 ProjectLevelArtifactsPanel 渲染真实内容。
+        current_result.result_payload["project_level_artifacts"] = (
+            _build_project_level_artifacts(scenario_summary)
+        )
         # ``langgraph-v1`` pauses before its decision node so a deterministic
         # Stage 1 summary can be checked here.  A high-risk/boundary result
         # must remain resumable and cannot fall through to Run completion.

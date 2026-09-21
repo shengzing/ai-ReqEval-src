@@ -99,12 +99,17 @@ uv sync --locked --project src/apps/api --group dev --no-install-project --pytho
 # 2) 就绪检查：Python 版本 + 依赖导入 + Mongo ping
 cd src/apps/api && .venv/bin/python ../../scripts/check_dev_ready.py
 
-# 3) 启动 API 开发服务器（默认 :8899）
-cd src/apps/api && ../../scripts/start_api_dev.sh
+# 3) 启动 API 开发服务器（默认 :8899，热重载）
+cd src/apps/api && .venv/bin/python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8899 --reload
 
-# 4) 跑测试（单跑 harness：追加 tests/test_deepagents_harness_provider.py tests/test_langgraph_harness.py）
+# 4) 启动 API 生产服务器（多 worker，无热重载）
+cd src/apps/api && .venv/bin/python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8899 --workers 4
+
+# 5) 跑测试（单跑 harness：追加 tests/test_deepagents_harness_provider.py tests/test_langgraph_harness.py）
 cd src/apps/api && .venv/bin/python -m pytest tests/ -q
 ```
+
+> 也可用根级脚本一键启动（含环境校验）：`cd src/apps/api && ../../scripts/start_api_dev.sh`
 
 **切换 Harness 版本**（环境变量覆盖全局默认，或经 `StageSkillProfile` 按 stage 配置）：
 

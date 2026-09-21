@@ -72,6 +72,172 @@ _HITL_MANDATORY_ALIASES = {"mandatory", "必须人工", "全量人工", "强制"
 
 # ── Risk keyword lists for deterministic risk identification ───────────
 
+# ── §3.2.2 PIPL §24 替代渠道（mandatory 级场景必填） ─────────────────────
+ALTERNATIVE_CHANNELS: set[str] = {
+    "manual_fallback",       # 人工流程降级
+    "full_manual",           # 纯人工复核
+    "manual_plus_rules",     # 人工 + 规则引擎
+}
+_ALTCHANNEL_ALIASES: dict[str, str] = {
+    "人工流程降级": "manual_fallback",
+    "人工降级": "manual_fallback",
+    "纯人工复核": "full_manual",
+    "全量人工": "full_manual",
+    "人工+规则引擎": "manual_plus_rules",
+    "人工加规则": "manual_plus_rules",
+    "manual fallback": "manual_fallback",
+    "full manual": "full_manual",
+    "manual + rules": "manual_plus_rules",
+}
+
+# ── §3.2.3 NFRA §16 / 第十六条 批准主体（L3 必填） ──────────────────────
+APPROVAL_SUBJECTS: set[str] = {
+    "risk_committee",        # 风险管理委员会批准
+    "compliance_committee",  # 合规委员会
+    "technology_committee",  # 科技委员会
+}
+_APPROVAL_ALIASES: dict[str, str] = {
+    "风险管理委员会": "risk_committee",
+    "风管委": "risk_committee",
+    "合规委员会": "compliance_committee",
+    "合规委": "compliance_committee",
+    "科技委员会": "technology_committee",
+    "科技委": "technology_committee",
+}
+
+
+# ── §3.2 步骤1 STS 六变量社会子系统诊断（§3.2.1 / §1.3.1 STS 理论） ────
+# 论文 §3.2.1 六变量（Trist&Bamforth 1951, Emery 1959）：自律性 / 责任 /
+# 任务整体性 / 多样性 / 社会支持 / 边界跨越。L3 场景须在自律性、责任、
+# 社会支持三个维度经业务/风险/合规角色访谈确认无重大缺陷，方可继续步骤2。
+STS_6_VARIABLES: tuple[str, ...] = (
+    "autonomy",           # 自律性
+    "responsibility",     # 责任
+    "task_integrity",     # 任务整体性
+    "diversity",          # 多样性
+    "social_support",     # 社会支持
+    "boundary_spanning",  # 边界跨越
+)
+_STS_VAR_ALIASES: dict[str, str] = {
+    "自律性": "autonomy",
+    "责任": "responsibility",
+    "任务整体性": "task_integrity",
+    "多样性": "diversity",
+    "社会支持": "social_support",
+    "边界跨越": "boundary_spanning",
+}
+STS_DIAGNOSIS_STATUSES: set[str] = {"aligned", "tension", "misaligned", "unmapped"}
+"""单变量的诊断状态：aligned 对齐 / tension 需协调 / misaligned 失配 / unmapped 未识别。"""
+
+
+# ── §3.2 步骤2 KOITL 组织在环循环归属（step2 四字段之一） ────────────
+# 论文 §3.2 步骤2 KOITL 组织层循环映射表：四类组织循环。
+# UA-Tasks = AI 使用循环（谁复核/审批频率）；CA-Tasks = AI 定制循环（谁维护
+# 规则）；O-Tasks = 原任务循环（业务负责人签字链）；C-Tasks = 上下文变化
+# 循环（监管/业务变化触发再评估）。
+ORG_LOOP_KINDS: set[str] = {
+    "UA-Tasks",  # AI 使用循环：谁复核、审批频率
+    "CA-Tasks",  # AI 定制循环：谁维护规则
+    "O-Tasks",   # 原任务循环：业务负责人签字链
+    "C-Tasks",   # 上下文变化循环：监管/业务变化触发再评估
+}
+_ORG_LOOP_KIND_ALIASES: dict[str, str] = {
+    "AI使用循环": "UA-Tasks",
+    "AI 使用循环": "UA-Tasks",
+    "AI定制循环": "CA-Tasks",
+    "AI 定制循环": "CA-Tasks",
+    "原任务循环": "O-Tasks",
+    "上下文变化循环": "C-Tasks",
+}
+MIN_SUBSTANTIVE_ORG_LOOPS = 1  # L2/L3 至少 1 个明确循环
+
+
+# ── §3.2.4 最小审计留痕 8 字段（贷后场景；AML +1 = 9 字段） ────────────
+# NFRA 第二十一条（显著标识+日志≥业务存续期）+ 第二十二条（推理路径/阈值
+# 触发记录保留）+ 金规〔2024〕24号第五十条（可验证可审核可追溯）。
+AUDIT_FIELD_IDS: tuple[str, ...] = (
+    "input_material_version",   # (1) 输入材料版本
+    "raw_analysis_output",      # (2) AI 原始输出
+    "reviewer_opinion",         # (3) 复核人及复核意见
+    "timestamp",                # (4) 时间戳
+    "inference_path",           # (5) 推理路径（NFRA §22）
+    "threshold_trigger_log",    # (6) 阈值触发记录（NFRA §22）
+    "ai_disclosure",            # (7) AI 生成内容显著标识（NFRA §21）
+    "log_retention",            # (8) 日志保存期限（NFRA §21）
+)
+AML_EXTRA_AUDIT_FIELD_IDS: tuple[str, ...] = (
+    "regulatory_reporting_log", # (9) AML 监管报送流水
+)
+AIGC_DISCLOSURE_VALUES: set[str] = {
+    "explicit_watermark",   # 显式水印（贷后风控必须）
+    "implicit_metadata",    # 隐式元数据
+    "unlabeled",            # 不标识
+}
+LOG_RETENTION_VALUES: set[str] = {
+    "business_lifetime",    # ≥业务存续期（贷后风控默认）
+    "5_years",
+    "10_years",
+}
+# 贷后风控：AIGC 标识必须 = explicit_watermark；日志保存 ≥ business_lifetime
+LOAN_RISK_REQUIRED_AIGC = "explicit_watermark"
+LOAN_RISK_REQUIRED_LOG_RETENTION = "business_lifetime"
+
+
+def normalize_alternative_channel(value: object) -> str | None:
+    """Normalize PIPL §24 alternative channel to contract enum, or None if absent/empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text in ALTERNATIVE_CHANNELS:
+        return text
+    if text in _ALTCHANNEL_ALIASES:
+        return _ALTCHANNEL_ALIASES[text]
+    raise ValueError(f"Cannot normalize alternative_channel: {value!r}")
+
+
+def normalize_approval_subject(value: object) -> str | None:
+    """Normalize NFRA §16 approval subject to contract enum, or None if absent/empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text in APPROVAL_SUBJECTS:
+        return text
+    if text in _APPROVAL_ALIASES:
+        return _APPROVAL_ALIASES[text]
+    raise ValueError(f"Cannot normalize approval_subject: {value!r}")
+
+
+def normalize_sts_variable(value: object) -> str | None:
+    """Normalize a STS six-variable key to contract enum, or None if absent/empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text in STS_6_VARIABLES:
+        return text
+    if text in _STS_VAR_ALIASES:
+        return _STS_VAR_ALIASES[text]
+    raise ValueError(f"Cannot normalize STS variable: {value!r}")
+
+
+def normalize_org_loop_kind(value: object) -> str | None:
+    """Normalize a KOITL org-loop kind to contract enum, or None if absent/empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text in ORG_LOOP_KINDS:
+        return text
+    if text in _ORG_LOOP_KIND_ALIASES:
+        return _ORG_LOOP_KIND_ALIASES[text]
+    raise ValueError(f"Cannot normalize org_loop kind: {value!r}")
+
 RISK_L3_KEYWORDS = [
     "风险等级调整", "客户处置", "监管敏感", "审计追责",
     "漏报风险", "未脱敏", "客户经营数据", "合规复核",
@@ -485,6 +651,217 @@ def validate_risk_grading(summary: dict) -> list[dict]:
             "message": f"boundary_review_status must be one of {sorted(BOUNDARY_REVIEW_STATUSES)}, got {brs!r}",
             "suggested_action": "Set to business_pending / business_confirmed / business_rejected",
         })
+
+    # 19. PIPL §24 alternative channel — mandatory HITL 场景须配置不依赖算法的替代渠道
+    alt_channel = summary.get("alternative_channel")
+    if hl == "mandatory":
+        if not alt_channel:
+            issues.append({
+                "issue_type": "missing_field",
+                "field": "alternative_channel",
+                "severity": "high",
+                "message": "mandatory HITL 场景须配置替代渠道（PIPL §24），缺失则阶段一不予锁定",
+                "suggested_action": "Set alternative_channel 到 manual_fallback / full_manual / manual_plus_rules",
+            })
+        elif alt_channel not in ALTERNATIVE_CHANNELS:
+            issues.append({
+                "issue_type": "invalid_enum",
+                "field": "alternative_channel",
+                "severity": "high",
+                "message": f"alternative_channel must be one of {sorted(ALTERNATIVE_CHANNELS)}, got {alt_channel!r}",
+                "suggested_action": "使用 normalize_alternative_channel 归一后填入",
+            })
+
+    # 20. NFRA §16 approval subject — 枚举收窄为风管委/合规委/科技委，
+    #     L3 场景必须 = risk_committee（风管委），缺失或非风管委则锁定门禁不通过。
+    approval_subject = summary.get("approval_subject")
+    if rl == "L3":
+        if not approval_subject:
+            issues.append({
+                "issue_type": "missing_field",
+                "field": "approval_subject",
+                "severity": "high",
+                "message": "L3 风险场景须配置批准主体（NFRA 第十六条），缺失则阶段一不予锁定",
+                "suggested_action": "Set approval_subject 到 risk_committee / compliance_committee / technology_committee",
+            })
+        elif approval_subject not in APPROVAL_SUBJECTS:
+            issues.append({
+                "issue_type": "invalid_enum",
+                "field": "approval_subject",
+                "severity": "high",
+                "message": f"approval_subject must be one of {sorted(APPROVAL_SUBJECTS)}, got {approval_subject!r}",
+                "suggested_action": "使用 normalize_approval_subject 归一后填入",
+            })
+        elif approval_subject != "risk_committee":
+            issues.append({
+                "issue_type": "invalid_value",
+                "field": "approval_subject",
+                "severity": "high",
+                "message": f"L3 场景批准主体必须为 risk_committee（风管委），当前 {approval_subject!r}",
+                "suggested_action": "NFRA 第十六条：风险管理类高风险应用须经本机构风险管理委员会批准",
+            })
+
+    # 21. §3.2 步骤1 STS 六变量社会子系统诊断 — 阶段一建议补全，便于回溯
+    #     STS 社会侧诊断与 ISO 技术侧分级互为依据。不强制（缺失只 warning），
+    #     但 L3 场景强烈建议给出全部 6 变量以备 §5.3 回溯校准。
+    sts = summary.get("sts_diagnosis")
+    if sts is not None:
+        if not isinstance(sts, dict):
+            issues.append({
+                "issue_type": "invalid_enum",
+                "field": "sts_diagnosis",
+                "severity": "medium",
+                "message": "sts_diagnosis 必须为 dict（键为 STS 六变量 id）",
+                "suggested_action": "提供 {autonomy: aligned/tension/..., responsibility: ..., task_integrity: ..., diversity: ..., social_support: ..., boundary_spanning: ...}",
+            })
+        else:
+            for var in sts.keys():
+                if var not in STS_6_VARIABLES:
+                    issues.append({
+                        "issue_type": "invalid_enum",
+                        "field": f"sts_diagnosis.{var}",
+                        "severity": "medium",
+                        "message": f"sts_diagnosis key {var!r} 不是 STS 六变量之一",
+                        "suggested_action": f"使用 STS_6_VARIABLES = {list(STS_6_VARIABLES)}",
+                    })
+                elif sts[var] not in STS_DIAGNOSIS_STATUSES:
+                    issues.append({
+                        "issue_type": "invalid_enum",
+                        "field": f"sts_diagnosis.{var}",
+                        "severity": "medium",
+                        "message": f"sts_diagnosis[{var}] = {sts[var]!r} 不在 {sorted(STS_DIAGNOSIS_STATUSES)}",
+                        "suggested_action": "使用 aligned / tension / misaligned / unmapped",
+                    })
+            if rl == "L3":
+                covered = sum(1 for v in STS_6_VARIABLES if v in sts)
+                if covered < 3:
+                    issues.append({
+                        "issue_type": "missing_field",
+                        "field": "sts_diagnosis",
+                        "severity": "medium",
+                        "message": f"L3 场景建议补全 STS 六变量诊断（当前 {covered} / 6）",
+                        "suggested_action": "为至少 3 个 STS 变量给出 aligned/tension/misaligned 判定",
+                    })
+
+    # 22. §3.2 步骤2 KOITL 组织循环归属（org_loops）— L2/L3 须有组织在环记录
+    # P2 数据契约：loop_type / responsible_role / frequency / mandatory_flag（论文口径）；
+    # 兼容旧字段名 kind / role（历史数据）。L3 场景四类循环（UA/CA/O/C）须全部在场。
+    org_loops = summary.get("org_loops")
+    if rl in {"L2", "L3"}:
+        if not isinstance(org_loops, list) or len(org_loops) < MIN_SUBSTANTIVE_ORG_LOOPS:
+            issues.append({
+                "issue_type": "missing_field",
+                "field": "org_loops",
+                "severity": "medium",
+                "message": f"{rl} 风险建议记录至少 {MIN_SUBSTANTIVE_ORG_LOOPS} 条组织循环归属（UA/CA/O/C-Tasks）",
+                "suggested_action": "添加 org_loops 列表，每项含 loop_id / loop_type / responsible_role / frequency / mandatory_flag / evidence_refs",
+            })
+        else:
+            seen_loop_types: set[str] = set()
+            for idx, loop in enumerate(org_loops):
+                if not isinstance(loop, dict):
+                    issues.append({
+                        "issue_type": "invalid_enum",
+                        "field": f"org_loops[{idx}]",
+                        "severity": "medium",
+                        "message": "org_loops 项必须为 dict",
+                        "suggested_action": "提供 {loop_id, loop_type, responsible_role, frequency, mandatory_flag, evidence_refs}",
+                    })
+                    continue
+                # P2: loop_type is the thesis field; kind is the legacy alias.
+                loop_type = loop.get("loop_type") or loop.get("kind")
+                if loop_type is not None and loop_type not in ORG_LOOP_KINDS:
+                    issues.append({
+                        "issue_type": "invalid_enum",
+                        "field": f"org_loops[{idx}].loop_type",
+                        "severity": "medium",
+                        "message": f"org_loops[{idx}].loop_type = {loop_type!r} 不在 {sorted(ORG_LOOP_KINDS)}",
+                        "suggested_action": "使用 UA-Tasks / CA-Tasks / O-Tasks / C-Tasks",
+                    })
+                elif loop_type is not None:
+                    seen_loop_types.add(loop_type)
+                # P2: responsible_role is the thesis field; role is legacy.
+                responsible_role = loop.get("responsible_role") or loop.get("role")
+                if not responsible_role:
+                    issues.append({
+                        "issue_type": "missing_field",
+                        "field": f"org_loops[{idx}].responsible_role",
+                        "severity": "medium",
+                        "message": f"org_loops[{idx}] 缺少 responsible_role（旧字段名 role 亦可）",
+                        "suggested_action": "填写负责该循环的角色（如 风险经理 / 业务负责人）",
+                    })
+            # 论文 §3.2 步骤2 判据：L3 场景任一组织循环缺位则 locked=False
+            if rl == "L3":
+                missing_types = ORG_LOOP_KINDS - seen_loop_types
+                if missing_types:
+                    issues.append({
+                        "issue_type": "missing_field",
+                        "field": "org_loops",
+                        "severity": "high",
+                        "message": f"L3 场景四类组织循环缺位：{sorted(missing_types)}",
+                        "suggested_action": "L3 须 UA-Tasks（风险+合规双签）+ CA-Tasks（规则维护）+ O-Tasks（业务负责人 mandatory 签字）+ C-Tasks（季度再评估）全部在场",
+                    })
+                # 论文 §3.2 步骤2：O-Tasks 必含业务负责人 mandatory 签字
+                o_tasks = [l for l in org_loops if isinstance(l, dict) and (l.get("loop_type") or l.get("kind")) == "O-Tasks"]
+                if o_tasks and not any(l.get("mandatory_flag") is True for l in o_tasks):
+                    issues.append({
+                        "issue_type": "invalid_value",
+                        "field": "org_loops[O-Tasks].mandatory_flag",
+                        "severity": "high",
+                        "message": "L3 场景 O-Tasks 必含业务负责人 mandatory 签字（mandatory_flag=True）",
+                        "suggested_action": "将 O-Tasks 循环的 mandatory_flag 设为 True",
+                    })
+
+    # 23. §3.2.4 最小审计留痕 — P2 起支持结构化对象（{field_id, label,
+    #     value, evidence_refs}）；兼容旧字符串列表（不做结构校验）。
+    #     L2/L3 场景建议至少覆盖基础 4 字段；枚举字段值校验。
+    audit_reqs = summary.get("audit_requirements")
+    if isinstance(audit_reqs, list) and audit_reqs and all(isinstance(r, dict) for r in audit_reqs):
+        seen_field_ids: set[str] = set()
+        for idx, req in enumerate(audit_reqs):
+            fid = req.get("field_id")
+            if fid not in AUDIT_FIELD_IDS and fid not in AML_EXTRA_AUDIT_FIELD_IDS:
+                issues.append({
+                    "issue_type": "invalid_enum",
+                    "field": f"audit_requirements[{idx}].field_id",
+                    "severity": "medium",
+                    "message": f"audit field_id {fid!r} 不在 8+1 字段 schema 内",
+                    "suggested_action": f"使用 {list(AUDIT_FIELD_IDS)} 或 AML 扩展 {list(AML_EXTRA_AUDIT_FIELD_IDS)}",
+                })
+            else:
+                seen_field_ids.add(fid)
+            # 枚举字段值校验
+            if fid == "ai_disclosure":
+                val = req.get("value")
+                if val is not None and val not in AIGC_DISCLOSURE_VALUES:
+                    issues.append({
+                        "issue_type": "invalid_enum",
+                        "field": f"audit_requirements[{idx}].value",
+                        "severity": "high",
+                        "message": f"ai_disclosure = {val!r} 不在 {sorted(AIGC_DISCLOSURE_VALUES)}",
+                        "suggested_action": "贷后风控必须 explicit_watermark（NFRA 第二十一条）",
+                    })
+            if fid == "log_retention":
+                val = req.get("value")
+                if val is not None and val not in LOG_RETENTION_VALUES:
+                    issues.append({
+                        "issue_type": "invalid_enum",
+                        "field": f"audit_requirements[{idx}].value",
+                        "severity": "high",
+                        "message": f"log_retention = {val!r} 不在 {sorted(LOG_RETENTION_VALUES)}",
+                        "suggested_action": "贷后风控默认 business_lifetime（≥业务存续期，NFRA 第二十一条）",
+                    })
+        # L2/L3 覆盖度：至少覆盖基础 4 字段
+        if rl in {"L2", "L3"}:
+            base_covered = sum(1 for f in AUDIT_FIELD_IDS[:4] if f in seen_field_ids)
+            if base_covered < 4:
+                issues.append({
+                    "issue_type": "missing_field",
+                    "field": "audit_requirements",
+                    "severity": "medium",
+                    "message": f"{rl} 场景建议覆盖基础 4 审计字段（当前 {base_covered} / 4）",
+                    "suggested_action": "补全 input_material_version / raw_analysis_output / reviewer_opinion / timestamp",
+                })
 
     return issues
 

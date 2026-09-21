@@ -583,20 +583,53 @@ def risk_identify_tool(
 
     combined_text = "\n".join(all_text_parts)
     if not combined_text.strip():
+        # P2: empty-evidence path still emits the guaranteed default risk item
+        # and a fully-shaped confidence dict so downstream consumers never see
+        # a schema hole (tests expect risk-1 "通用风险识别" + field_scores keys).
+        default_risk_item = {
+            "risk_id": "risk-1",
+            "node_id": "",
+            "description": "通用风险识别",
+            "severity": "low",
+            "likelihood": "low",
+            "impact": "",
+            "owner_role": "",
+            "mitigation": "",
+            "audit_need": "",
+            "risk_level": "",
+            "evidence_refs": [],
+        }
         return ToolResult(
             name="risk_identify",
             summary="无可用证据，跳过风险识别。",
             raw_output={
                 "risk_level": "",
                 "hitl_level": "",
-                "risk_items": [],
-                "risk_matrix": [],
+                "risk_items": [default_risk_item],
+                "risk_matrix": [
+                    {
+                        "risk_id": "risk-1",
+                        "item": "通用风险识别",
+                        "level": "",
+                        "control": "人工复核",
+                        "evidence_refs": [],
+                    }
+                ],
                 "hitl_rules": [],
                 "prohibited_conditions": [],
                 "fatal_errors": [],
                 "audit_requirements": [],
-                "confidence": {},
-                "to_confirm": [],
+                "confidence": {
+                    "overall": 0.3,
+                    "field_scores": {
+                        "boundary": 0.3,
+                        "process_nodes": 0.3,
+                        "risk_items": 0.3,
+                        "hitl_rules": 0.3,
+                        "audit_requirements": 0.3,
+                    },
+                },
+                "to_confirm": ["无可用证据，风险识别结果需人工确认。"],
                 "boundary_flag": False,
                 "evidence_refs": [],
             },
@@ -856,10 +889,59 @@ def risk_identify_tool(
     # (LLM-first with the 4-keyword fallback baked into the extractor when
     # risk_level == L3). The pre-upgrade inline block is no longer needed here.
 
-    # ── Audit requirements ────────────────────────────────────────────
+    # ── Audit requirements — P2: structured 8-field schema (§3.2.4) ────
+    # Parse free-text requirements, map to canonical field IDs, and always
+    # emit all 8 base fields so downstream coverage checks see the full
+    # schema (configured=True/False per field). Enum-valued fields get
+    # thesis-mandated defaults for loan-risk scenarios.
 
     audit_match = re.search(r"审计留痕要求[：:]\s*(.+)", combined_text)
-    audit_requirements = _split_semicolon_list(audit_match.group(1)) if audit_match else []
+    audit_raw_items = _split_semicolon_list(audit_match.group(1)) if audit_match else []
+    audit_text = "；".join(audit_raw_items)
+
+    # Keyword → field_id mapping (mirrors frontend AUDIT_KEYWORD_RULES)
+    _AUDIT_FIELD_DEFS = [
+        ("input_material_version", "输入材料版本", ["输入材料版本", "材料版本", "版本号"]),
+        ("raw_analysis_output", "AI 原始输出", ["AI输出", "AI 输出", "原始输出", "分析结果"]),
+        ("reviewer_opinion", "复核人及复核意见", ["复核人", "复核意见", "复核结论"]),
+        ("timestamp", "时间戳", ["时间戳"]),
+        ("inference_path", "推理路径", ["推理路径", "推理链路"]),
+        ("threshold_trigger_log", "阈值触发记录", ["阈值触发", "阈值命中"]),
+        ("ai_disclosure", "AI 生成内容显著标识", ["显著标识", "AIGC", "水印", "AI生成"]),
+        ("log_retention", "日志保存期限", ["日志保存", "保存期限", "存续期"]),
+    ]
+    audit_requirements: list[dict] = []
+    for fid, label, keywords in _AUDIT_FIELD_DEFS:
+        configured = any(kw in audit_text for kw in keywords)
+        value = ""
+        if fid == "ai_disclosure":
+            # NFRA §21 + 深度合成规定 §17: L2/L3 贷后风控必须显式水印。
+            # 这是监管最低要求（非业务可选项），L2/L3 直接生效。
+            value = "explicit_watermark" if risk_level in {"L2", "L3"} else ""
+            configured = configured or risk_level in {"L2", "L3"}
+        elif fid == "log_retention":
+            # NFRA §21: 日志保存 ≥ 业务存续期。L2/L3 直接生效。
+            value = "business_lifetime" if risk_level in {"L2", "L3"} else ""
+            configured = configured or risk_level in {"L2", "L3"}
+        elif configured:
+            matched = [raw for raw in audit_raw_items if any(kw in raw for kw in keywords)]
+            value = matched[0] if matched else label
+        audit_requirements.append({
+            "field_id": fid,
+            "label": label,
+            "configured": configured,
+            "value": value,
+            "evidence_refs": [primary_evidence_id] if configured else [],
+        })
+    # AML 场景追加第 9 字段（监管报送流水）
+    if any(kw in combined_text for kw in ("反洗钱", "AML", "监管报送", "报送流水")):
+        audit_requirements.append({
+            "field_id": "regulatory_reporting_log",
+            "label": "监管报送流水",
+            "configured": True,
+            "value": "监管报送批次号+回执",
+            "evidence_refs": [primary_evidence_id],
+        })
 
     # ── Confidence scoring ────────────────────────────────────────────
 
@@ -875,7 +957,7 @@ def risk_identify_tool(
         directly_supported += 1
     if fatal_errors:
         directly_supported += 1
-    if audit_requirements:
+    if any(r.get("configured") for r in audit_requirements if isinstance(r, dict)):
         directly_supported += 1
     if risk_level != "L1" or any(kw in combined_text for kw in RISK_L2_KEYWORDS + RISK_L3_KEYWORDS):
         directly_supported += 1
@@ -894,7 +976,7 @@ def risk_identify_tool(
             "process_nodes": round(min(0.9, 0.5 + 0.1 * len(all_refs)), 2) if all_refs else 0.3,
             "risk_items": round(min(0.9, 0.6 + 0.05 * len(risk_items)), 2) if risk_items else 0.3,
             "hitl_rules": round(min(0.9, 0.6 + 0.1 * len(hitl_rules)), 2) if hitl_rules else 0.3,
-            "audit_requirements": round(min(0.9, 0.5 + 0.1 * len(audit_requirements)), 2) if audit_requirements else 0.3,
+            "audit_requirements": round(min(0.9, 0.5 + 0.1 * sum(1 for r in audit_requirements if isinstance(r, dict) and r.get("configured"))), 2) if audit_requirements else 0.3,
         },
     }
 
@@ -923,6 +1005,25 @@ def risk_identify_tool(
             "field": "boundary_flag",
             "question": "同时命中L2和L3风险关键词，建议人工复核风险等级是否合理",
             "reason": "L2+L3关键词同时存在可能表示场景处于等级边界",
+            "source_refs": list(all_refs),
+        })
+
+    # P2: governance fields are no longer auto-filled. When they are required
+    # (mandatory HITL / L3), emit to_confirm entries so a human must supply
+    # the value before the stage can lock. Empty string + to_confirm is the
+    # contract-expected "missing but actionable" state.
+    if hitl_level == "mandatory":
+        to_confirm.append({
+            "field": "alternative_channel",
+            "question": "mandatory HITL 场景须配置替代渠道（PIPL §24），请人工确认。",
+            "reason": "PIPL 第二十四条：不得仅通过自动化决策方式作出决定，须有不依赖算法的替代渠道",
+            "source_refs": list(all_refs),
+        })
+    if risk_level == "L3":
+        to_confirm.append({
+            "field": "approval_subject",
+            "question": "L3 风险场景须由风险管理委员会批准（NFRA 第十六条），请人工确认。",
+            "reason": "NFRA 第十六条：风险管理类高风险应用须经本机构风险管理委员会批准",
             "source_refs": list(all_refs),
         })
 
@@ -956,6 +1057,47 @@ def risk_identify_tool(
             "boundary_flag": risk_confidence.boundary_flag,
             "source": risk_confidence.source,
         },
+        # §3.2.2 PIPL §24 替代渠道 + §3.2.3 NFRA §16 批准主体 — P2 起不再
+        # 自动填默认值。mandatory / L3 场景由 to_confirm 提示人工确认，
+        # 值为空时 contract 校验 + lock 门禁会正确拒绝锁定。
+        "alternative_channel": "",
+        "approval_subject": "",
+        # §3.2.1 STS 六变量诊断（默认值 unmapped，等待业务侧或 LLM 补全）
+        "sts_diagnosis": {
+            "autonomy": "unmapped",
+            "responsibility": "unmapped",
+            "task_integrity": "unmapped",
+            "diversity": "unmapped",
+            "social_support": "unmapped",
+            "boundary_spanning": "unmapped",
+        },
+        # §3.2 步骤2 KOITL 四类组织循环（L2/L3 默认给出骨架，待人工/LLM 补全）
+        # P2 数据契约对齐论文：loop_type / responsible_role / frequency / mandatory_flag
+        "org_loops": (
+            [
+                {"loop_id": "loop-ua", "loop_type": "UA-Tasks",
+                 "responsible_role": "风险经理 / 合规经理",
+                 "frequency": "per_decision", "mandatory_flag": risk_level == "L3",
+                 "responsibility": "AI 使用循环：复核与审批频率",
+                 "evidence_refs": list(all_refs)[:1]},
+                {"loop_id": "loop-ca", "loop_type": "CA-Tasks",
+                 "responsible_role": "科技 / 规则维护",
+                 "frequency": "per_release", "mandatory_flag": False,
+                 "responsibility": "AI 定制循环：谁维护规则",
+                 "evidence_refs": []},
+                {"loop_id": "loop-o", "loop_type": "O-Tasks",
+                 "responsible_role": "业务负责人",
+                 "frequency": "per_decision", "mandatory_flag": risk_level == "L3",
+                 "responsibility": "原任务循环：业务负责人签字链",
+                 "evidence_refs": [primary_evidence_id]},
+                {"loop_id": "loop-c", "loop_type": "C-Tasks",
+                 "responsible_role": "合规 / 监管联络",
+                 "frequency": "quarterly", "mandatory_flag": risk_level == "L3",
+                 "responsibility": "上下文变化循环：监管/业务变化触发再评估",
+                 "evidence_refs": []},
+            ]
+            if risk_level in {"L2", "L3"} else []
+        ),
     }
 
     # P0-negation: include negation warnings in ToolResult
